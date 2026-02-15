@@ -93,26 +93,15 @@ def _init_workspace_db(db_path: Path):
 def import_snapshot(
     snapshot_path: Path,
     target_project_path: str,
-    force: bool = False,
 ) -> bool:
     """Import a conversation snapshot into Cursor's databases.
 
     Args:
         snapshot_path: Path to the .json snapshot file.
         target_project_path: The project path on this machine.
-        force: If True, skip the Cursor-running check.
 
     Returns True on success, False on failure.
     """
-    # Safety check
-    if not force and is_cursor_running():
-        print(
-            "Error: Cursor appears to be running. Close Cursor before importing,\n"
-            "or use --force to skip this check (not recommended).",
-            file=sys.stderr,
-        )
-        return False
-
     # Load snapshot
     try:
         snapshot = json.loads(snapshot_path.read_text())
@@ -214,6 +203,16 @@ def import_all_snapshots(
 
     Returns (success_count, failure_count).
     """
+    # Warn once if Cursor is running (but proceed anyway)
+    if not force and is_cursor_running():
+        print(
+            "Warning: Cursor is running. Imports will write to Cursor's database,\n"
+            "but Cursor won't see the changes until you reload the window\n"
+            "(Cmd+Shift+P -> 'Reload Window').\n"
+            "Use --force to suppress this warning.\n",
+            file=sys.stderr,
+        )
+
     if snapshots_dir is None:
         snapshots_dir = paths.get_snapshots_dir()
 
@@ -232,7 +231,7 @@ def import_all_snapshots(
             project_snapshots = basename_dir
 
     if not project_snapshots.exists():
-        print(f"No snapshots found for project '{project_name}'", file=sys.stderr)
+        print(f"No snapshots found for project '{project_id}'", file=sys.stderr)
         return 0, 0
 
     snapshot_files = sorted(project_snapshots.glob("*.json"))
@@ -245,7 +244,7 @@ def import_all_snapshots(
 
     for sf in snapshot_files:
         print(f"Importing {sf.name}...")
-        if import_snapshot(sf, target_project_path, force=force):
+        if import_snapshot(sf, target_project_path):
             success += 1
             print(f"  OK")
         else:

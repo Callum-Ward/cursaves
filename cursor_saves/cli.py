@@ -183,15 +183,15 @@ def cmd_import(args):
         )
         print(f"\nDone: {success} imported, {failure} failed.")
         if success > 0:
-            print("Restart Cursor to see imported conversations.")
+            print("Reload Cursor window (Cmd+Shift+P -> 'Reload Window') to see them.")
     elif args.file:
         snapshot_path = Path(args.file)
         if not snapshot_path.exists():
             print(f"Error: File not found: {snapshot_path}", file=sys.stderr)
             sys.exit(1)
         print(f"Importing {snapshot_path.name}...")
-        if import_snapshot(snapshot_path, project_path, force=args.force):
-            print("Done. Restart Cursor to see the imported conversation.")
+        if import_snapshot(snapshot_path, project_path):
+            print("Done. Reload Cursor window to see the imported conversation.")
         else:
             print("Import failed.", file=sys.stderr)
             sys.exit(1)
@@ -309,7 +309,7 @@ def cmd_pull(args):
 
     print(f"\nDone: {success} imported, {failure} failed.")
     if success > 0:
-        print("Restart Cursor to see imported conversations.")
+        print("Reload Cursor window (Cmd+Shift+P -> 'Reload Window') to see them.")
 
 
 def cmd_watch(args):
@@ -456,7 +456,24 @@ def main():
 
     args = parser.parse_args()
     if not args.command:
-        parser.print_help()
+        print(
+            "cursaves - sync Cursor agent chats between machines\n"
+            "\n"
+            "Usage: cursaves <command> [options]\n"
+            "\n"
+            "Commands:\n"
+            "  push         Checkpoint + commit + push to remote\n"
+            "  pull         Pull from remote + import into Cursor\n"
+            "  init         Initialize ~/.cursaves/ sync repo\n"
+            "  list         List conversations for the current project\n"
+            "  status       Show sync status (local vs snapshots)\n"
+            "  export <id>  Export a single conversation\n"
+            "  checkpoint   Export all conversations (no git)\n"
+            "  import       Import snapshots (no git)\n"
+            "  watch        Auto-checkpoint and sync in the background\n"
+            "\n"
+            "Run 'cursaves <command> --help' for details on a specific command."
+        )
         sys.exit(1)
 
     args.func(args)
