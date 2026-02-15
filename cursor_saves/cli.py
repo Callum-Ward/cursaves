@@ -28,17 +28,15 @@ def _resolve_project(args) -> str:
 
 
 def cmd_workspaces(args):
-    """List all Cursor workspaces."""
-    from . import db
-
-    workspaces = paths.list_all_workspaces()
-    if not workspaces:
-        print("No Cursor workspaces found.")
-        return
-
+    """List Cursor workspaces that have conversations."""
     from datetime import datetime, timezone
 
-    print(f"{'#':<4} {'Type':<6} {'Path':<50} {'Host':<20} {'Last Active'}")
+    workspaces = paths.list_workspaces_with_conversations()
+    if not workspaces:
+        print("No workspaces with conversations found.")
+        return
+
+    print(f"{'#':<4} {'Type':<6} {'Path':<50} {'Host':<15} {'Chats':>5}  {'Last Active'}")
     print("-" * 110)
 
     for i, ws in enumerate(workspaces, 1):
@@ -46,15 +44,16 @@ def cmd_workspaces(args):
         if len(path) > 48:
             path = "..." + path[-45:]
         host = ws["host"] or ""
+        convos = ws.get("conversations", 0)
         if ws["mtime"]:
             dt = datetime.fromtimestamp(ws["mtime"], tz=timezone.utc)
             active = dt.strftime("%Y-%m-%d %H:%M")
         else:
             active = "unknown"
 
-        print(f"{i:<4} {ws['type']:<6} {path:<50} {host:<20} {active}")
+        print(f"{i:<4} {ws['type']:<6} {path:<50} {host:<15} {convos:>5}  {active}")
 
-    print(f"\n{len(workspaces)} workspace(s)")
+    print(f"\n{len(workspaces)} workspace(s) with conversations")
     print("\nUse 'cursaves push -w <number>' to push a specific workspace.")
 
 

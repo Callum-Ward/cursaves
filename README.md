@@ -66,6 +66,12 @@ This puts `cursaves` on your PATH so you can run it from any directory. Run this
 
 If `~/.local/bin` is not on your PATH, run `uv tool update-shell` or add it manually.
 
+### Update
+
+```bash
+uv tool upgrade cursaves
+```
+
 ### Alternative: clone and run locally
 
 ```bash

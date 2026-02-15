@@ -210,14 +210,40 @@ def list_all_workspaces() -> list[dict]:
     return workspaces
 
 
+def list_workspaces_with_conversations() -> list[dict]:
+    """List workspaces that have at least one conversation.
+
+    Returns the same dicts as list_all_workspaces(), plus a
+    'conversations' key with the count.
+    """
+    from . import db
+
+    result = []
+    for ws in list_all_workspaces():
+        db_path = ws["workspace_dir"] / "state.vscdb"
+        if not db_path.exists():
+            continue
+        try:
+            with db.CursorDB(db_path) as cdb:
+                data = cdb.get_json("composer.composerData", table="ItemTable")
+                if data:
+                    composers = data.get("allComposers", [])
+                    if composers:
+                        ws["conversations"] = len(composers)
+                        result.append(ws)
+        except Exception:
+            continue
+    return result
+
+
 def resolve_workspace(selector: str) -> Optional[dict]:
     """Resolve a workspace selector to a workspace dict.
 
     The selector can be:
-      - A number (1-based index from list_all_workspaces)
+      - A number (1-based index from list_workspaces_with_conversations)
       - A path substring (matched against workspace paths)
     """
-    workspaces = list_all_workspaces()
+    workspaces = list_workspaces_with_conversations()
     if not workspaces:
         return None
 
