@@ -12,6 +12,52 @@ from .importer import import_all_snapshots, import_snapshot
 from .watch import watch_loop
 
 
+def _resolve_project(args) -> str:
+    """Resolve the project path from --workspace, --project, or cwd."""
+    if hasattr(args, "workspace") and args.workspace:
+        ws = paths.resolve_workspace(args.workspace)
+        if ws is None:
+            print(
+                f"Error: No workspace matching '{args.workspace}'.\n"
+                f"Run 'cursaves workspaces' to see available workspaces.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        return ws["path"]
+    return args.project if (hasattr(args, "project") and args.project) else paths.get_project_path()
+
+
+def cmd_workspaces(args):
+    """List all Cursor workspaces."""
+    from . import db
+
+    workspaces = paths.list_all_workspaces()
+    if not workspaces:
+        print("No Cursor workspaces found.")
+        return
+
+    from datetime import datetime, timezone
+
+    print(f"{'#':<4} {'Type':<6} {'Path':<50} {'Host':<20} {'Last Active'}")
+    print("-" * 110)
+
+    for i, ws in enumerate(workspaces, 1):
+        path = ws["path"]
+        if len(path) > 48:
+            path = "..." + path[-45:]
+        host = ws["host"] or ""
+        if ws["mtime"]:
+            dt = datetime.fromtimestamp(ws["mtime"], tz=timezone.utc)
+            active = dt.strftime("%Y-%m-%d %H:%M")
+        else:
+            active = "unknown"
+
+        print(f"{i:<4} {ws['type']:<6} {path:<50} {host:<20} {active}")
+
+    print(f"\n{len(workspaces)} workspace(s)")
+    print("\nUse 'cursaves push -w <number>' to push a specific workspace.")
+
+
 def cmd_init(args):
     """Initialize the sync directory (~/.cursaves/) as a git repo."""
     sync_dir = paths.get_sync_dir()
@@ -89,7 +135,7 @@ def cmd_init(args):
 
 def cmd_list(args):
     """List conversations for the current project."""
-    project_path = args.project or paths.get_project_path()
+    project_path = _resolve_project(args)
     conversations = export.list_conversations(project_path)
 
     if not conversations:
@@ -129,7 +175,7 @@ def cmd_list(args):
 
 def cmd_export(args):
     """Export a single conversation to a snapshot file."""
-    project_path = args.project or paths.get_project_path()
+    project_path = _resolve_project(args)
     composer_id = args.id
 
     print(f"Exporting conversation {composer_id}...")
@@ -154,7 +200,7 @@ def cmd_export(args):
 
 def cmd_checkpoint(args):
     """Checkpoint all conversations for the current project."""
-    project_path = args.project or paths.get_project_path()
+    project_path = _resolve_project(args)
 
     print(f"Checkpointing conversations for {project_path}...")
     saved = export.checkpoint_project(project_path)
@@ -173,7 +219,7 @@ def cmd_checkpoint(args):
 
 def cmd_import(args):
     """Import conversation snapshots."""
-    project_path = args.project or paths.get_project_path()
+    project_path = _resolve_project(args)
 
     if args.all:
         print(f"Importing all snapshots for {project_path}...")
@@ -219,7 +265,7 @@ def cmd_push(args):
     from .watch import _git_has_remote
 
     sync_dir = _require_sync_repo()
-    project_path = args.project or paths.get_project_path()
+    project_path = _resolve_project(args)
 
     # Step 1: Checkpoint
     print(f"Checkpointing conversations for {project_path}...")
@@ -276,7 +322,7 @@ def cmd_pull(args):
     from .watch import _git_has_remote
 
     sync_dir = _require_sync_repo()
-    project_path = args.project or paths.get_project_path()
+    project_path = _resolve_project(args)
 
     # Step 1: Git pull
     if _git_has_remote(sync_dir):
@@ -314,7 +360,7 @@ def cmd_pull(args):
 
 def cmd_watch(args):
     """Run the background watch daemon."""
-    project_path = args.project or paths.get_project_path()
+    project_path = _resolve_project(args)
     watch_loop(
         project_path=project_path,
         interval=args.interval,
@@ -325,7 +371,7 @@ def cmd_watch(args):
 
 def cmd_status(args):
     """Show sync status -- what's local vs what's in snapshots."""
-    project_path = args.project or paths.get_project_path()
+    project_path = _resolve_project(args)
     project_id = paths.get_project_identifier(project_path)
     snapshots_dir = paths.get_snapshots_dir() / project_id
 
@@ -375,6 +421,14 @@ def main():
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
+    # Helper to add -w and -p flags to a subparser
+    def add_project_args(p):
+        p.add_argument(
+            "--workspace", "-w",
+            help="Workspace number from 'cursaves workspaces' (for SSH remotes)",
+        )
+        p.add_argument("--project", "-p", help="Project path (default: current directory)")
+
     # ── init ────────────────────────────────────────────────────────
     p_init = subparsers.add_parser(
         "init", help="Initialize ~/.cursaves/ sync repo"
@@ -385,33 +439,39 @@ def main():
     )
     p_init.set_defaults(func=cmd_init)
 
+    # ── workspaces ─────────────────────────────────────────────────
+    p_workspaces = subparsers.add_parser(
+        "workspaces", help="List all Cursor workspaces (local and SSH remote)"
+    )
+    p_workspaces.set_defaults(func=cmd_workspaces)
+
     # ── list ────────────────────────────────────────────────────────
-    p_list = subparsers.add_parser("list", help="List conversations for the current project")
-    p_list.add_argument("--project", "-p", help="Project path (default: current directory)")
+    p_list = subparsers.add_parser("list", help="List conversations for a project")
+    add_project_args(p_list)
     p_list.add_argument("--json", action="store_true", help="Output as JSON for scripting")
     p_list.set_defaults(func=cmd_list)
 
     # ── export ──────────────────────────────────────────────────────
     p_export = subparsers.add_parser("export", help="Export a single conversation")
     p_export.add_argument("id", help="Conversation (composer) ID")
-    p_export.add_argument("--project", "-p", help="Project path (default: current directory)")
+    add_project_args(p_export)
     p_export.set_defaults(func=cmd_export)
 
     # ── checkpoint ──────────────────────────────────────────────────
     p_checkpoint = subparsers.add_parser(
-        "checkpoint", help="Export all conversations for the current project"
+        "checkpoint", help="Export all conversations for a project"
     )
-    p_checkpoint.add_argument("--project", "-p", help="Project path (default: current directory)")
+    add_project_args(p_checkpoint)
     p_checkpoint.set_defaults(func=cmd_checkpoint)
 
     # ── import ──────────────────────────────────────────────────────
     p_import = subparsers.add_parser("import", help="Import conversation snapshots")
     p_import.add_argument("--all", action="store_true", help="Import all snapshots for the project")
     p_import.add_argument("--file", "-f", help="Import a specific snapshot file")
-    p_import.add_argument("--project", "-p", help="Target project path (default: current directory)")
+    add_project_args(p_import)
     p_import.add_argument(
         "--force", action="store_true",
-        help="Skip the Cursor-running safety check (not recommended)",
+        help="Suppress the Cursor-running warning",
     )
     p_import.set_defaults(func=cmd_import)
 
@@ -419,30 +479,30 @@ def main():
     p_push = subparsers.add_parser(
         "push", help="Checkpoint + commit + push (one command to save and sync)"
     )
-    p_push.add_argument("--project", "-p", help="Project path (default: current directory)")
+    add_project_args(p_push)
     p_push.set_defaults(func=cmd_push)
 
     # ── pull ────────────────────────────────────────────────────────
     p_pull = subparsers.add_parser(
         "pull", help="Git pull + import snapshots (one command to sync and restore)"
     )
-    p_pull.add_argument("--project", "-p", help="Project path (default: current directory)")
+    add_project_args(p_pull)
     p_pull.add_argument(
         "--force", action="store_true",
-        help="Skip the Cursor-running safety check",
+        help="Suppress the Cursor-running warning",
     )
     p_pull.set_defaults(func=cmd_pull)
 
     # ── status ──────────────────────────────────────────────────────
     p_status = subparsers.add_parser("status", help="Show sync status")
-    p_status.add_argument("--project", "-p", help="Project path (default: current directory)")
+    add_project_args(p_status)
     p_status.set_defaults(func=cmd_status)
 
     # ── watch ────────────────────────────────────────────────────────
     p_watch = subparsers.add_parser(
         "watch", help="Auto-checkpoint and sync in the background"
     )
-    p_watch.add_argument("--project", "-p", help="Project path (default: current directory)")
+    add_project_args(p_watch)
     p_watch.add_argument(
         "--interval", "-i", type=int, default=60,
         help="Seconds between checks (default: 60)",
@@ -462,15 +522,20 @@ def main():
             "Usage: cursaves <command> [options]\n"
             "\n"
             "Commands:\n"
-            "  push         Checkpoint + commit + push to remote\n"
-            "  pull         Pull from remote + import into Cursor\n"
-            "  init         Initialize ~/.cursaves/ sync repo\n"
-            "  list         List conversations for the current project\n"
-            "  status       Show sync status (local vs snapshots)\n"
-            "  export <id>  Export a single conversation\n"
-            "  checkpoint   Export all conversations (no git)\n"
-            "  import       Import snapshots (no git)\n"
-            "  watch        Auto-checkpoint and sync in the background\n"
+            "  push          Checkpoint + commit + push to remote\n"
+            "  pull          Pull from remote + import into Cursor\n"
+            "  init          Initialize ~/.cursaves/ sync repo\n"
+            "  workspaces    List all Cursor workspaces (local + SSH)\n"
+            "  list          List conversations for a project\n"
+            "  status        Show sync status (local vs snapshots)\n"
+            "  export <id>   Export a single conversation\n"
+            "  checkpoint    Export all conversations (no git)\n"
+            "  import        Import snapshots (no git)\n"
+            "  watch         Auto-checkpoint and sync in the background\n"
+            "\n"
+            "Options:\n"
+            "  -w <number>   Select workspace by number (from 'cursaves workspaces')\n"
+            "  -p <path>     Specify project path directly\n"
             "\n"
             "Run 'cursaves <command> --help' for details on a specific command."
         )

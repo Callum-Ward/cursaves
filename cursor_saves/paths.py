@@ -139,6 +139,105 @@ def get_project_path() -> str:
     return os.getcwd()
 
 
+def list_all_workspaces() -> list[dict]:
+    """List all Cursor workspaces with metadata.
+
+    Returns a list of dicts with:
+      - folder_uri: raw URI from workspace.json
+      - path: extracted filesystem path
+      - type: 'local' or 'ssh'
+      - host: SSH hostname (for ssh type, None for local)
+      - workspace_dir: Path to the workspace directory
+      - mtime: modification time of the workspace DB
+    """
+    ws_storage = get_workspace_storage_dir()
+    if not ws_storage.exists():
+        return []
+
+    workspaces = []
+    for ws_dir in ws_storage.iterdir():
+        if not ws_dir.is_dir():
+            continue
+        ws_json = ws_dir / "workspace.json"
+        if not ws_json.exists():
+            continue
+        try:
+            data = json.loads(ws_json.read_text())
+            folder_uri = data.get("folder", "")
+            if not folder_uri:
+                continue
+
+            ws_type = "local"
+            host = None
+            folder_path = ""
+
+            if folder_uri.startswith("file://"):
+                folder_path = folder_uri[len("file://"):]
+                folder_path = folder_path.replace("%20", " ")
+            elif folder_uri.startswith("vscode-remote://"):
+                ws_type = "ssh"
+                # Format: vscode-remote://ssh-remote%2B<host>/<path>
+                authority = folder_uri.split("/")[2]  # ssh-remote%2B<host>
+                if "%2B" in authority:
+                    host = authority.split("%2B", 1)[1]
+                elif "+" in authority:
+                    host = authority.split("+", 1)[1]
+                parts = folder_uri.split("/", 3)
+                if len(parts) >= 4:
+                    folder_path = "/" + parts[3]
+                else:
+                    continue
+            else:
+                continue
+
+            # Get DB modification time
+            db_path = ws_dir / "state.vscdb"
+            mtime = db_path.stat().st_mtime if db_path.exists() else 0
+
+            workspaces.append({
+                "folder_uri": folder_uri,
+                "path": os.path.normpath(folder_path),
+                "type": ws_type,
+                "host": host,
+                "workspace_dir": ws_dir,
+                "mtime": mtime,
+            })
+        except (json.JSONDecodeError, OSError):
+            continue
+
+    # Sort by modification time, newest first
+    workspaces.sort(key=lambda w: w["mtime"], reverse=True)
+    return workspaces
+
+
+def resolve_workspace(selector: str) -> Optional[dict]:
+    """Resolve a workspace selector to a workspace dict.
+
+    The selector can be:
+      - A number (1-based index from list_all_workspaces)
+      - A path substring (matched against workspace paths)
+    """
+    workspaces = list_all_workspaces()
+    if not workspaces:
+        return None
+
+    # Try as index
+    try:
+        idx = int(selector)
+        if 1 <= idx <= len(workspaces):
+            return workspaces[idx - 1]
+        return None
+    except ValueError:
+        pass
+
+    # Try as path substring
+    for ws in workspaces:
+        if selector in ws["path"]:
+            return ws
+
+    return None
+
+
 def get_sync_dir() -> Path:
     """Return the cursaves sync directory (~/.cursaves/).
 

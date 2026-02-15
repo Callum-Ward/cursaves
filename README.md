@@ -112,13 +112,14 @@ The first `push` will create the initial commit on the remote. After that, `push
 
 ## Commands
 
-All commands default to the current working directory as the project path. Use `-p /path/to/project` to target a different project.
+All commands default to the current working directory as the project path. Use `-w <number>` to target a workspace by number (from `cursaves workspaces`), or `-p /path` to specify a path directly.
 
 | Command | Description | Modifies Cursor data? |
 |---------|-------------|----------------------|
 | **`push`** | **Checkpoint + commit + push (the main command)** | No |
 | **`pull`** | **Git pull + import snapshots** | Yes |
 | `init` | Initialize the sync repo at ~/.cursaves/ | No |
+| `workspaces` | List all Cursor workspaces (local + SSH remote) | No |
 | `list` | Show conversations for a project | No |
 | `status` | Compare local conversations vs snapshots | No |
 | `export <id>` | Export one conversation to a snapshot | No |
@@ -189,7 +190,7 @@ Snapshot files contain your **full conversation data**: your prompts, AI respons
 
 ## Typical Workflows
 
-### Simple sync (recommended)
+### Local projects
 
 ```bash
 # On Machine A -- before switching, from your project directory:
@@ -197,8 +198,31 @@ cursaves push
 
 # On Machine B -- after switching, from your project directory:
 cursaves pull
-# Restart Cursor
+# Reload Cursor window (Cmd+Shift+P -> 'Reload Window')
 ```
+
+### SSH remote projects
+
+When you connect to a VM via SSH in Cursor, chat data is stored **on your local machine**, not on the VM. This means `cursaves` must run locally, not on the VM.
+
+Use `cursaves workspaces` to see your SSH workspaces, then reference them by number:
+
+```bash
+# See all workspaces (local and SSH remote):
+cursaves workspaces
+#  #    Type   Path                              Host
+#  1    ssh    /home/user/repos/my-project        my-vm
+#  2    local  /Users/me/Projects/other-app
+#  ...
+
+# Push conversations from an SSH workspace:
+cursaves push -w 1
+
+# On another machine, pull them:
+cursaves pull -w 1
+```
+
+Run these commands in a **regular terminal** on your local machine (not in Cursor's integrated terminal, which runs on the VM).
 
 ### Automatic sync
 
