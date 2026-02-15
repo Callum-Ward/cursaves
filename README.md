@@ -20,10 +20,19 @@ cursaves push
 
 # On another machine: pull and restore conversations
 cursaves pull
-# Restart Cursor to see them
 ```
 
-That's it. `push` checkpoints your conversations, commits, and pushes to git. `pull` fetches from git and imports into Cursor's database.
+For SSH remote projects, Cursor stores chats on your local machine. Use `-w` to target a workspace:
+
+```bash
+# See all workspaces (local + SSH remote)
+cursaves workspaces
+
+# Push/pull a specific workspace by number
+cursaves push -w 3
+```
+
+`push` checkpoints your conversations, commits, and pushes to git. `pull` fetches from git and imports into Cursor's database.
 
 ### Example
 
