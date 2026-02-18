@@ -1,5 +1,7 @@
 # cursaves
 
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-yellow?style=flat&logo=buy-me-a-coffee)](https://buymeacoffee.com/callumward)
+
 Cursor stores chat history locally. Switch machines and it's gone. This tool checkpoints conversations to a git repo so you can restore them anywhere.
 
 ## Quick Start
@@ -19,7 +21,8 @@ Then from any project directory:
 cursaves push
 
 # On another machine: pull and restore conversations
-cursaves pull
+cursaves pull --reload
+# Or without --reload: Ctrl+Shift+P -> 'Developer: Reload Window'
 ```
 
 For SSH remote projects, Cursor stores chats on your local machine. Use `-w` to target a workspace:
@@ -32,7 +35,7 @@ cursaves workspaces
 cursaves push -w 3
 ```
 
-`push` checkpoints your conversations, commits, and pushes to git. `pull` fetches from git and imports into Cursor's database.
+`push` checkpoints your conversations, commits, and pushes to git. `pull` fetches from git and imports into Cursor's database. The `--reload` flag triggers Cursor to reload its window so you can see the imported conversations immediately without restarting.
 
 ### Example
 
@@ -119,8 +122,8 @@ If you only want local checkpoints (no syncing), just run `cursaves init` withou
 
 ```bash
 # From any project directory:
-cursaves push    # checkpoint + commit + push
-cursaves pull    # pull + import (close Cursor first)
+cursaves push              # checkpoint + commit + push
+cursaves pull --reload     # pull + import + reload Cursor window
 ```
 
 The first `push` will create the initial commit on the remote. After that, `push` and `pull` keep everything in sync.
@@ -132,17 +135,20 @@ All commands default to the current working directory as the project path. Use `
 | Command | Description | Modifies Cursor data? |
 |---------|-------------|----------------------|
 | **`push`** | **Checkpoint + commit + push (the main command)** | No |
+| **`push -s`** | **Interactively select which conversations to push** | No |
 | **`pull`** | **Git pull + import snapshots** | Yes |
 | `init` | Initialize the sync repo at ~/.cursaves/ | No |
 | `workspaces` | List all Cursor workspaces (local + SSH remote) | No |
 | `list` | Show conversations for a project | No |
 | `status` | Compare local conversations vs snapshots | No |
+| `reload` | Trigger Cursor to reload and pick up imported conversations | No |
+| `delete` | Delete cached snapshots (interactive, by ID, or all) | No |
 | `export <id>` | Export one conversation to a snapshot | No |
 | `checkpoint` | Export all conversations (no git) | No |
 | `import --all` | Import snapshots (no git) | Yes |
 | `watch` | Auto-checkpoint and sync in the background | No (reads only) |
 
-Most of the time you only need `push` and `pull`. The other commands are there for finer-grained control.
+Most of the time you only need `push` and `pull`. Use `push -s` when you want to push only specific conversations instead of everything. Use `delete` to clean up snapshots you no longer need.
 
 ### Auto-sync with `watch`
 
@@ -191,6 +197,30 @@ When importing conversations on a different machine, absolute file paths in conv
 
 For example, a conversation started on macOS at `/Users/you/Projects/myapp` will have its file references rewritten to `/home/you/repos/myapp` when imported on a Linux machine.
 
+## Reloading Cursor After Import
+
+Cursor caches all conversation data in memory and never watches its SQLite files for external changes. After `pull` or `import` writes new conversations to the database, Cursor needs to reload its window to pick them up.
+
+**Option 1: Auto-reload (recommended)**
+
+```bash
+cursaves pull --reload      # or: cursaves import --all --reload
+```
+
+This uses `xdotool` (Linux) or `osascript` (macOS) to programmatically trigger "Developer: Reload Window" in Cursor. On Linux, install xdotool first: `sudo apt install xdotool`.
+
+**Option 2: Manual reload**
+
+Open the Cursor command palette (`Ctrl+Shift+P` / `Cmd+Shift+P`), type `Developer: Reload Window`, and press Enter.
+
+**Option 3: Standalone reload command**
+
+```bash
+cursaves reload
+```
+
+This is useful if you imported earlier and forgot to reload, or if you want to trigger a reload at any time.
+
 ## Safety
 
 - **Read operations** (`list`, `export`, `checkpoint`, `status`, `watch`) work on a temporary copy of the database. They never touch Cursor's files and are safe to run while Cursor is open.
@@ -212,8 +242,8 @@ Snapshot files contain your **full conversation data**: your prompts, AI respons
 cursaves push
 
 # On Machine B -- after switching, from your project directory:
-cursaves pull
-# Reload Cursor window (Cmd+Shift+P -> 'Reload Window')
+cursaves pull --reload
+# Or if --reload doesn't work: Ctrl+Shift+P -> 'Developer: Reload Window'
 ```
 
 ### SSH remote projects
@@ -266,6 +296,12 @@ cursaves/                      # Source repo (this repo, public)
 ```
 
 The tool code (this repo) is separate from your conversation data (`~/.cursaves/`). Install the tool once, point it at a private remote, and sync from any project directory.
+
+## Support
+
+If you find this useful, consider buying me a coffee:
+
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://buymeacoffee.com/callumward)
 
 ## License
 

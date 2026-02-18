@@ -71,6 +71,59 @@ def sanitize_project_path(project_path: str) -> str:
     return project_path.strip("/").replace("/", "-")
 
 
+def list_all_workspaces() -> list[dict]:
+    """List all Cursor workspaces with their project paths.
+
+    Returns list of dicts with: path (project path), ws_dir (workspace dir),
+    name (display name), uri (raw folder URI).
+    Sorted by modification time, newest first.
+    """
+    ws_storage = get_workspace_storage_dir()
+    if not ws_storage.exists():
+        return []
+
+    workspaces = []
+    for ws_dir in ws_storage.iterdir():
+        if not ws_dir.is_dir():
+            continue
+        ws_json = ws_dir / "workspace.json"
+        if not ws_json.exists():
+            continue
+        try:
+            data = json.loads(ws_json.read_text())
+            folder_uri = data.get("folder", "")
+
+            if folder_uri.startswith("file://"):
+                folder_path = folder_uri[len("file://"):]
+                folder_path = folder_path.replace("%20", " ")
+            elif folder_uri.startswith("vscode-remote://"):
+                parts = folder_uri.split("/", 3)
+                if len(parts) >= 4:
+                    folder_path = "/" + parts[3]
+                else:
+                    continue
+            else:
+                continue
+
+            # Check if this workspace actually has conversations
+            ws_db = ws_dir / "state.vscdb"
+            if not ws_db.exists():
+                continue
+
+            workspaces.append({
+                "path": os.path.normpath(folder_path),
+                "ws_dir": ws_dir,
+                "name": os.path.basename(os.path.normpath(folder_path)),
+                "uri": folder_uri,
+            })
+        except (json.JSONDecodeError, OSError):
+            continue
+
+    # Sort by workspace modification time, newest first
+    workspaces.sort(key=lambda w: w["ws_dir"].stat().st_mtime, reverse=True)
+    return workspaces
+
+
 def find_workspace_dirs_for_project(project_path: str) -> list[Path]:
     """Find all workspace directories that map to a given project path.
 

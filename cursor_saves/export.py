@@ -213,8 +213,14 @@ def save_snapshot(snapshot: dict, snapshots_dir: Path) -> Path:
     return snapshot_file
 
 
-def checkpoint_project(project_path: str) -> list[Path]:
-    """Export all conversations for a project to snapshots/.
+def checkpoint_project(
+    project_path: str,
+    composer_ids: Optional[list[str]] = None,
+) -> list[Path]:
+    """Export conversations for a project to snapshots/.
+
+    If composer_ids is given, only export those conversations.
+    Otherwise, export all conversations.
 
     Returns list of saved snapshot file paths.
     """
@@ -225,6 +231,8 @@ def checkpoint_project(project_path: str) -> list[Path]:
     for c in conversations:
         composer_id = c.get("composerId")
         if not composer_id:
+            continue
+        if composer_ids is not None and composer_id not in composer_ids:
             continue
 
         snapshot = export_conversation(project_path, composer_id)
