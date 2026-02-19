@@ -488,8 +488,24 @@ def cmd_pull(args):
     # Step 1: Git pull
     if _git_has_remote(sync_dir):
         print("Pulling latest snapshots...", end="", flush=True)
+        # Fetch first, then try to rebase onto the remote branch.
+        # We use explicit "origin main" to avoid failures when the
+        # local branch has no upstream tracking configured yet.
+        subprocess.run(
+            ["git", "fetch", "origin"],
+            cwd=str(sync_dir),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        # Set up tracking so future pulls work without specifying branch
+        subprocess.run(
+            ["git", "branch", "--set-upstream-to=origin/main", "main"],
+            cwd=str(sync_dir),
+            capture_output=True,
+        )
         pull_result = subprocess.run(
-            ["git", "pull", "--rebase", "--autostash"],
+            ["git", "rebase", "--autostash", "origin/main"],
             cwd=str(sync_dir),
             capture_output=True,
             text=True,
