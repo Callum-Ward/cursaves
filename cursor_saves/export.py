@@ -199,8 +199,18 @@ def list_conversations(project_path: str) -> list[dict]:
     return results
 
 
-def export_conversation(project_path: str, composer_id: str) -> Optional[dict]:
-    """Export a single conversation to a self-contained snapshot dict."""
+def export_conversation(
+    project_path: str, composer_id: str, include_context: bool = False
+) -> Optional[dict]:
+    """Export a single conversation to a self-contained snapshot dict.
+    
+    Args:
+        project_path: The project path.
+        composer_id: The conversation ID.
+        include_context: If True, include messageContexts (full file contents 
+            that were in context). This can make snapshots very large (100MB+)
+            but is not needed to restore the conversation.
+    """
     conv_data = get_conversation_data(composer_id)
     if not conv_data:
         return None
@@ -208,7 +218,7 @@ def export_conversation(project_path: str, composer_id: str) -> Optional[dict]:
     # Get bubble entries (individual message content - new storage format)
     bubbles = get_bubble_entries(composer_id)
 
-    return {
+    snapshot = {
         "version": 3,  # Bumped for bubbleEntries support
         "exportedAt": datetime.now(timezone.utc).isoformat(),
         "sourceMachine": paths.get_machine_id(),
@@ -217,10 +227,15 @@ def export_conversation(project_path: str, composer_id: str) -> Optional[dict]:
         "composerId": composer_id,
         "composerData": conv_data,
         "contentBlobs": get_content_blobs(composer_id),
-        "messageContexts": get_message_contexts(composer_id),
         "bubbleEntries": bubbles,  # Individual message content
         "transcript": get_transcript(project_path, composer_id),
     }
+    
+    # messageContexts contains full file contents - skip by default to keep size down
+    if include_context:
+        snapshot["messageContexts"] = get_message_contexts(composer_id)
+    
+    return snapshot
 
 
 def save_snapshot(snapshot: dict, snapshots_dir: Path) -> Path:
