@@ -274,26 +274,47 @@ cursaves pull
 
 ### SSH remote projects
 
-When you connect to a VM via SSH in Cursor, chat data is stored **on your local machine**, not on the VM. This means `cursaves` must run locally, not on the VM.
+When you connect to a remote server via Cursor's SSH feature, **chats are stored on your local machine**, not on the remote server. This means:
 
-Use `cursaves workspaces` to see your SSH workspaces, then reference them by number:
+- `cursaves` must run **locally** (not on the remote server)
+- SSH workspace paths like `/home/user/repos/myapp` don't exist on your local filesystem
+- You can't just `cd` into them and run `cursaves push`
+
+**Pushing from SSH workspaces:**
 
 ```bash
-# See all workspaces (local and SSH remote):
-cursaves workspaces
-#  #    Type   Path                              Host
-#  1    ssh    /home/user/repos/my-project        my-vm
-#  2    local  /Users/me/Projects/other-app
-#  ...
+# Option 1: Interactive selection (recommended)
+cursaves push -s
+#  → Shows all workspaces, lets you pick which chats to push
 
-# Push conversations from an SSH workspace:
-cursaves push -w 1
+# Option 2: By workspace number
+cursaves workspaces          # Find the workspace number
+cursaves push -w 3           # Push from workspace #3
 
-# On another machine, pull them:
-cursaves pull -w 1
+# Option 3: By path (must match exactly)
+cursaves push -p /home/user/repos/myapp
 ```
 
-Run these commands in a **regular terminal** on your local machine (not in Cursor's integrated terminal, which runs on the VM).
+**Pulling into SSH workspaces:**
+
+```bash
+# Option 1: Interactive selection (recommended)
+cursaves pull -s
+#  → Shows available snapshots
+#  → Auto-detects matching SSH workspaces
+#  → Imports into the correct workspace
+
+# Option 2: By workspace number
+cursaves workspaces          # Find the workspace number
+cursaves pull -w 3           # Pull into workspace #3
+
+# Option 3: By path
+cursaves pull -p /home/user/repos/myapp
+```
+
+**Important:** Run these commands in a **local terminal**, not in Cursor's integrated terminal (which runs on the remote server).
+
+**After importing:** Restart Cursor (quit and reopen) to see the chats in your SSH session.
 
 ### Automatic sync
 
