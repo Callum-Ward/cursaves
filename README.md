@@ -21,8 +21,8 @@ Then from any project directory:
 cursaves push
 
 # On another machine: pull and restore conversations
-cursaves pull --reload
-# Or without --reload: Ctrl+Shift+P -> 'Developer: Reload Window'
+cursaves pull
+# Then restart Cursor (quit and reopen) to see the imported chats
 ```
 
 For SSH remote projects, Cursor stores chats on your local machine. Use `-w` to target a workspace:
@@ -35,7 +35,7 @@ cursaves workspaces
 cursaves push -w 3
 ```
 
-`push` checkpoints your conversations, commits, and pushes to git. `pull` fetches from git and imports into Cursor's database. The `--reload` flag triggers Cursor to reload its window so you can see the imported conversations immediately without restarting.
+`push` checkpoints your conversations, commits, and pushes to git. `pull` fetches from git and imports into Cursor's database. After importing, restart Cursor (quit and reopen) to see the conversations.
 
 ### Example
 
@@ -123,7 +123,8 @@ If you only want local checkpoints (no syncing), just run `cursaves init` withou
 ```bash
 # From any project directory:
 cursaves push              # checkpoint + commit + push
-cursaves pull --reload     # pull + import + reload Cursor window
+cursaves pull              # pull + import into Cursor's database
+# Then restart Cursor to see the imported conversations
 ```
 
 The first `push` will create the initial commit on the remote. After that, `push` and `pull` keep everything in sync.
@@ -197,29 +198,11 @@ When importing conversations on a different machine, absolute file paths in conv
 
 For example, a conversation started on macOS at `/Users/you/Projects/myapp` will have its file references rewritten to `/home/you/repos/myapp` when imported on a Linux machine.
 
-## Reloading Cursor After Import
+## Restarting Cursor After Import
 
-Cursor caches all conversation data in memory and never watches its SQLite files for external changes. After `pull` or `import` writes new conversations to the database, Cursor needs to reload its window to pick them up.
+Cursor caches all conversation data in memory at startup and never watches its SQLite files for external changes. After `pull` or `import` writes new conversations to the database, **you must fully restart Cursor** (quit and reopen) to see the imported conversations.
 
-**Option 1: Auto-reload (recommended)**
-
-```bash
-cursaves pull --reload      # or: cursaves import --all --reload
-```
-
-This uses `xdotool` (Linux) or `osascript` (macOS) to programmatically trigger "Developer: Reload Window" in Cursor. On Linux, install xdotool first: `sudo apt install xdotool`.
-
-**Option 2: Manual reload**
-
-Open the Cursor command palette (`Ctrl+Shift+P` / `Cmd+Shift+P`), type `Developer: Reload Window`, and press Enter.
-
-**Option 3: Standalone reload command**
-
-```bash
-cursaves reload
-```
-
-This is useful if you imported earlier and forgot to reload, or if you want to trigger a reload at any time.
+Note: "Developer: Reload Window" is not sufficient -- it reloads the renderer but doesn't re-read the conversation database. A full application restart is required.
 
 ## Safety
 
@@ -242,8 +225,8 @@ Snapshot files contain your **full conversation data**: your prompts, AI respons
 cursaves push
 
 # On Machine B -- after switching, from your project directory:
-cursaves pull --reload
-# Or if --reload doesn't work: Ctrl+Shift+P -> 'Developer: Reload Window'
+cursaves pull
+# Then restart Cursor (quit and reopen) to see the imported conversations
 ```
 
 ### SSH remote projects

@@ -71,6 +71,24 @@ def sanitize_project_path(project_path: str) -> str:
     return project_path.strip("/").replace("/", "-")
 
 
+def _decode_ssh_host(host: str) -> str:
+    """Decode an SSH host identifier.
+
+    Cursor encodes SSH hosts as hex-encoded JSON, e.g.:
+    7b22686f73744e616d65223a22636f7265227d -> {"hostName":"core"} -> core
+    """
+    try:
+        # Try to decode as hex
+        decoded = bytes.fromhex(host).decode("utf-8")
+        # Try to parse as JSON
+        data = json.loads(decoded)
+        if isinstance(data, dict) and "hostName" in data:
+            return data["hostName"]
+    except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        pass
+    return host
+
+
 def list_all_workspaces() -> list[dict]:
     """List all Cursor workspaces with their project paths.
 
@@ -235,6 +253,9 @@ def list_all_workspaces() -> list[dict]:
                     host = authority.split("%2B", 1)[1]
                 elif "+" in authority:
                     host = authority.split("+", 1)[1]
+                # Decode the host if it's hex-encoded JSON (e.g. {"hostName":"core"})
+                if host:
+                    host = _decode_ssh_host(host)
                 parts = folder_uri.split("/", 3)
                 if len(parts) >= 4:
                     folder_path = "/" + parts[3]

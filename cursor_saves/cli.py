@@ -15,7 +15,7 @@ from .importer import (
     import_snapshot,
     list_snapshot_projects,
 )
-from .reload import print_reload_hint, reload_cursor_window
+from .reload import print_reload_hint
 from .watch import watch_loop
 
 
@@ -285,31 +285,13 @@ def cmd_import(args):
 
 
 def _maybe_reload(args):
-    """Attempt Cursor window reload if --reload was passed, otherwise print hint."""
-    if getattr(args, "reload", False):
-        print("Reloading Cursor window...", end="", flush=True)
-        if reload_cursor_window():
-            print(" done")
-        else:
-            print(" could not auto-reload")
-            print_reload_hint()
-    else:
-        print_reload_hint()
+    """Print restart hint after import."""
+    print_reload_hint()
 
 
 def cmd_reload(args):
-    """Trigger a Cursor window reload to pick up database changes."""
-    print("Reloading Cursor window...", end="", flush=True)
-    if reload_cursor_window():
-        print(" done")
-    else:
-        print(" could not auto-reload")
-        print_reload_hint()
-        print(
-            "\nNote: Auto-reload requires xdotool (Linux) or osascript (macOS).\n"
-            "Install xdotool: sudo apt install xdotool  (Debian/Ubuntu)\n"
-            "                  sudo dnf install xdotool  (Fedora)"
-        )
+    """Print restart instructions."""
+    print_reload_hint()
 
 
 def _require_sync_repo():
@@ -600,10 +582,19 @@ def cmd_pull(args):
             print(f"\nImporting from {project['name']}/ ({project['count']} snapshot(s))...")
 
             # Use the source path from the snapshots as the target,
-            # or ask the user if it doesn't exist locally
+            # or ask the user if it doesn't exist locally.
+            # For SSH workspaces, the path won't exist locally but we can
+            # still import if there's a matching Cursor workspace.
             target_path = None
             for sp in sorted(project["source_paths"]):
+                # Check if path exists locally (for local projects)
                 if os.path.isdir(sp):
+                    target_path = sp
+                    break
+                # Check if there's an existing Cursor workspace for this path
+                # (handles SSH remote workspaces where the path doesn't exist locally)
+                ws_dirs = paths.find_workspace_dirs_for_project(sp)
+                if ws_dirs:
                     target_path = sp
                     break
 
@@ -616,8 +607,8 @@ def cmd_pull(args):
                     target_path = cwd
                 else:
                     print(f"  Source path(s): {', '.join(sorted(project['source_paths']))}")
-                    print(f"  No matching local directory found.")
-                    print(f"  Enter the local project path to import into:")
+                    print(f"  No matching local or SSH workspace found.")
+                    print(f"  Enter the project path to import into:")
                     try:
                         target_path = input("  > ").strip()
                     except (EOFError, KeyboardInterrupt):
@@ -875,7 +866,7 @@ def main():
     )
     p_import.add_argument(
         "--reload", action="store_true",
-        help="Auto-reload Cursor window after import (requires xdotool on Linux)",
+        help="(deprecated, no effect) Cursor requires a full restart to see imports",
     )
     p_import.set_defaults(func=cmd_import)
 
@@ -905,13 +896,13 @@ def main():
     )
     p_pull.add_argument(
         "--reload", action="store_true",
-        help="Auto-reload Cursor window after import (requires xdotool on Linux)",
+        help="(deprecated, no effect) Cursor requires a full restart to see imports",
     )
     p_pull.set_defaults(func=cmd_pull)
 
     # ── reload ─────────────────────────────────────────────────────
     p_reload = subparsers.add_parser(
-        "reload", help="Trigger a Cursor window reload to pick up imported conversations"
+        "reload", help="(deprecated) Print restart instructions"
     )
     p_reload.set_defaults(func=cmd_reload)
 
@@ -966,7 +957,7 @@ def main():
             "  snapshots     List snapshot projects available after pull\n"
             "  list          List conversations for a project\n"
             "  status        Show sync status (local vs snapshots)\n"
-            "  reload        Trigger Cursor to reload and pick up changes\n"
+            "  reload        Print restart instructions\n"
             "  delete        Delete cached snapshots (interactive or by ID)\n"
             "  export <id>   Export a single conversation\n"
             "  checkpoint    Export all conversations (no git)\n"

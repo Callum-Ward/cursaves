@@ -125,11 +125,5 @@ def _reload_linux() -> bool:
 
 
 def print_reload_hint():
-    """Print instructions for manually reloading Cursor."""
-    system = platform.system()
-    if system == "Darwin":
-        shortcut = "Cmd+Shift+P"
-    else:
-        shortcut = "Ctrl+Shift+P"
-
-    print(f"Reload Cursor window ({shortcut} -> 'Developer: Reload Window') to see them.")
+    """Print instructions for restarting Cursor to pick up changes."""
+    print("Restart Cursor (quit and reopen) to see imported conversations.")

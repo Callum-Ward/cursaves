@@ -109,7 +109,7 @@ def import_snapshot(
         print(f"Error reading snapshot: {e}", file=sys.stderr)
         return False
 
-    if snapshot.get("version") not in (1, 2):
+    if snapshot.get("version") not in (1, 2, 3):
         print(f"Error: Unsupported snapshot version: {snapshot.get('version')}", file=sys.stderr)
         return False
 
@@ -125,6 +125,7 @@ def import_snapshot(
 
     content_blobs = snapshot.get("contentBlobs", {})
     message_contexts = snapshot.get("messageContexts", {})
+    bubble_entries = snapshot.get("bubbleEntries", {})
 
     # ── Step 1: Backup global DB ────────────────────────────────────
     global_db_path = paths.get_global_db_path()
@@ -147,6 +148,13 @@ def import_snapshot(
             global_cdb.write_json(
                 f"messageRequestContext:{composer_id}:{msg_key}", context
             )
+
+        # Write bubble entries (individual message content - v3 format)
+        for bubble_id, bubble_data in bubble_entries.items():
+            # Rewrite paths in bubble data too
+            if source_path and source_path != target_path:
+                bubble_data = rewrite_paths(bubble_data, source_path, target_path)
+            global_cdb.write_json(f"bubbleId:{composer_id}:{bubble_id}", bubble_data)
     finally:
         global_cdb.close()
 
@@ -300,8 +308,7 @@ def import_from_snapshot_dir(
     if not force and is_cursor_running():
         print(
             "Warning: Cursor is running. Imports will write to Cursor's database,\n"
-            "but Cursor won't see the changes until you reload the window\n"
-            "(Cmd+Shift+P -> 'Reload Window').\n"
+            "but Cursor won't see the changes until you restart it (quit and reopen).\n"
             "Use --force to suppress this warning.\n",
             file=sys.stderr,
         )
@@ -338,8 +345,7 @@ def import_all_snapshots(
     if not force and is_cursor_running():
         print(
             "Warning: Cursor is running. Imports will write to Cursor's database,\n"
-            "but Cursor won't see the changes until you reload the window\n"
-            "(Cmd+Shift+P -> 'Reload Window').\n"
+            "but Cursor won't see the changes until you restart it (quit and reopen).\n"
             "Use --force to suppress this warning.\n",
             file=sys.stderr,
         )

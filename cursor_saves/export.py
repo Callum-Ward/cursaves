@@ -117,6 +117,30 @@ def get_message_contexts(composer_id: str) -> dict[str, Any]:
     return contexts
 
 
+def get_bubble_entries(composer_id: str) -> dict[str, Any]:
+    """Fetch individual message bubble entries for a conversation.
+
+    Cursor stores message content under bubbleId:{composerId}:{bubbleId} keys.
+    This is the new storage format (as of 2026) where conversationMap is empty
+    and messages are stored individually.
+    """
+    global_db = paths.get_global_db_path()
+    if not global_db.exists():
+        return {}
+
+    bubbles = {}
+    with db.CursorDB(global_db) as cdb:
+        keys = cdb.list_keys(f"bubbleId:{composer_id}:")
+        for key in keys:
+            val = cdb.get_json(key)
+            if val:
+                # Store with just the bubble ID as key
+                bubble_id = key[len(f"bubbleId:{composer_id}:"):]
+                bubbles[bubble_id] = val
+
+    return bubbles
+
+
 def get_transcript(project_path: str, composer_id: str) -> Optional[str]:
     """Get the agent transcript for a conversation, if it exists."""
     transcript_dir = paths.find_transcript_dir(project_path)
@@ -180,8 +204,11 @@ def export_conversation(project_path: str, composer_id: str) -> Optional[dict]:
     if not conv_data:
         return None
 
+    # Get bubble entries (individual message content - new storage format)
+    bubbles = get_bubble_entries(composer_id)
+
     return {
-        "version": 2,
+        "version": 3,  # Bumped for bubbleEntries support
         "exportedAt": datetime.now(timezone.utc).isoformat(),
         "sourceMachine": paths.get_machine_id(),
         "sourceProjectPath": os.path.normpath(project_path),
@@ -190,6 +217,7 @@ def export_conversation(project_path: str, composer_id: str) -> Optional[dict]:
         "composerData": conv_data,
         "contentBlobs": get_content_blobs(composer_id),
         "messageContexts": get_message_contexts(composer_id),
+        "bubbleEntries": bubbles,  # Individual message content
         "transcript": get_transcript(project_path, composer_id),
     }
 
