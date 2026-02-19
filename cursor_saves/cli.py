@@ -19,13 +19,47 @@ from .reload import print_reload_hint
 from .watch import watch_loop
 
 
+def _ensure_repo_healthy(sync_dir: Path) -> None:
+    """Ensure the sync repo is in a healthy state (on main branch, upstream set)."""
+    if not sync_dir.exists():
+        return
+
+    # Check if we're on main branch
+    result = subprocess.run(
+        ["git", "symbolic-ref", "--short", "HEAD"],
+        cwd=str(sync_dir),
+        capture_output=True,
+        text=True,
+    )
+    current_branch = result.stdout.strip() if result.returncode == 0 else None
+
+    if current_branch != "main":
+        # Fix: checkout/create main branch
+        subprocess.run(
+            ["git", "checkout", "-B", "main"],
+            cwd=str(sync_dir),
+            capture_output=True,
+        )
+
+    # Ensure upstream is set (if remote exists)
+    from .watch import _git_has_remote
+    if _git_has_remote(sync_dir):
+        subprocess.run(
+            ["git", "branch", "--set-upstream-to=origin/main", "main"],
+            cwd=str(sync_dir),
+            capture_output=True,
+        )
+
+
 def _ensure_synced() -> None:
     """Pull from remote to ensure we have the latest state."""
     from .watch import _git_has_remote
 
     sync_dir = paths.get_sync_dir()
-    if sync_dir.exists() and _git_has_remote(sync_dir):
-        _git_pull_quiet(sync_dir)
+    if sync_dir.exists():
+        _ensure_repo_healthy(sync_dir)
+        if _git_has_remote(sync_dir):
+            _git_pull_quiet(sync_dir)
 
 
 def _resolve_project(args) -> str:
@@ -442,7 +476,8 @@ def cmd_push(args):
 
     sync_dir = _require_sync_repo()
 
-    # Step 0: Pull from remote first to sync with other machines
+    # Step 0: Ensure repo is healthy, then pull from remote
+    _ensure_repo_healthy(sync_dir)
     if _git_has_remote(sync_dir):
         if not _git_pull_quiet(sync_dir):
             print("Warning: Could not pull from remote, continuing anyway...", file=sys.stderr)
@@ -823,7 +858,8 @@ def cmd_delete(args):
     sync_dir = paths.get_sync_dir()
     snapshots_base = paths.get_snapshots_dir()
 
-    # Pull from remote first to avoid conflicts
+    # Ensure repo is healthy, then pull from remote
+    _ensure_repo_healthy(sync_dir)
     if sync_dir.exists() and _git_has_remote(sync_dir):
         _git_pull_quiet(sync_dir)
 
