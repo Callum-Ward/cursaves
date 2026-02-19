@@ -496,21 +496,24 @@ def cmd_push(args):
     # Push
     if _git_has_remote(sync_dir):
         print("  Pushing...", end="", flush=True)
-        push_result = subprocess.run(
-            ["git", "push", "-u", "origin", "HEAD"],
-            cwd=str(sync_dir),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if push_result.returncode == 0:
-            print(" done")
-        else:
-            print(f" failed: {push_result.stderr.strip()}", file=sys.stderr)
+        try:
+            push_result = subprocess.run(
+                ["git", "push", "-u", "origin", "HEAD"],
+                cwd=str(sync_dir),
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if push_result.returncode == 0:
+                print(" done")
+            else:
+                print(f" failed: {push_result.stderr.strip()}", file=sys.stderr)
+        except subprocess.TimeoutExpired:
+            print(" timed out (changes saved locally, push manually with: cd ~/.cursaves && git push)", file=sys.stderr)
     else:
         print("  No remote configured, skipping push")
 
-    print(f"\nDone. {len(saved)} conversation(s) saved and pushed.")
+    print(f"\nDone. {len(saved)} conversation(s) saved.")
 
 
 def _git_pull_quiet(sync_dir: Path) -> bool:
@@ -521,7 +524,7 @@ def _git_pull_quiet(sync_dir: Path) -> bool:
             cwd=str(sync_dir),
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=60,
         )
         subprocess.run(
             ["git", "branch", "--set-upstream-to=origin/main", "main"],
@@ -533,7 +536,7 @@ def _git_pull_quiet(sync_dir: Path) -> bool:
             cwd=str(sync_dir),
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=60,
         )
         return result.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -561,14 +564,18 @@ def _git_commit_and_push(sync_dir: Path, message: str) -> bool:
 
     # Push if remote exists
     if _git_has_remote(sync_dir):
-        push_result = subprocess.run(
-            ["git", "push", "-u", "origin", "HEAD"],
-            cwd=str(sync_dir),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        return push_result.returncode == 0
+        try:
+            push_result = subprocess.run(
+                ["git", "push", "-u", "origin", "HEAD"],
+                cwd=str(sync_dir),
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            return push_result.returncode == 0
+        except subprocess.TimeoutExpired:
+            print("Push timed out (changes saved locally)", file=sys.stderr)
+            return False
 
     return True
 
@@ -582,25 +589,30 @@ def _git_pull(sync_dir: Path) -> bool:
         return True
 
     print("Pulling latest snapshots...", end="", flush=True)
-    subprocess.run(
-        ["git", "fetch", "origin"],
-        cwd=str(sync_dir),
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    subprocess.run(
-        ["git", "branch", "--set-upstream-to=origin/main", "main"],
-        cwd=str(sync_dir),
-        capture_output=True,
-    )
-    pull_result = subprocess.run(
-        ["git", "rebase", "--autostash", "origin/main"],
-        cwd=str(sync_dir),
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    try:
+        subprocess.run(
+            ["git", "fetch", "origin"],
+            cwd=str(sync_dir),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        subprocess.run(
+            ["git", "branch", "--set-upstream-to=origin/main", "main"],
+            cwd=str(sync_dir),
+            capture_output=True,
+        )
+        pull_result = subprocess.run(
+            ["git", "rebase", "--autostash", "origin/main"],
+            cwd=str(sync_dir),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        print(" timed out", file=sys.stderr)
+        return False
+
     if pull_result.returncode == 0:
         print(" done")
         return True
