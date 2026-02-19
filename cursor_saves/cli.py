@@ -497,8 +497,14 @@ def cmd_push(args):
     if _git_has_remote(sync_dir):
         print("  Pushing...", end="", flush=True)
         try:
+            # Ensure we're on main branch first
+            subprocess.run(
+                ["git", "checkout", "-B", "main"],
+                cwd=str(sync_dir),
+                capture_output=True,
+            )
             push_result = subprocess.run(
-                ["git", "push", "-u", "origin", "HEAD"],
+                ["git", "push", "-u", "origin", "main"],
                 cwd=str(sync_dir),
                 capture_output=True,
                 text=True,
@@ -525,6 +531,12 @@ def _git_pull_quiet(sync_dir: Path) -> bool:
             capture_output=True,
             text=True,
             timeout=60,
+        )
+        # Ensure we're on main branch
+        subprocess.run(
+            ["git", "checkout", "-B", "main"],
+            cwd=str(sync_dir),
+            capture_output=True,
         )
         subprocess.run(
             ["git", "branch", "--set-upstream-to=origin/main", "main"],
@@ -565,8 +577,14 @@ def _git_commit_and_push(sync_dir: Path, message: str) -> bool:
     # Push if remote exists
     if _git_has_remote(sync_dir):
         try:
+            # Ensure we're on main branch first
+            subprocess.run(
+                ["git", "checkout", "-B", "main"],
+                cwd=str(sync_dir),
+                capture_output=True,
+            )
             push_result = subprocess.run(
-                ["git", "push", "-u", "origin", "HEAD"],
+                ["git", "push", "-u", "origin", "main"],
                 cwd=str(sync_dir),
                 capture_output=True,
                 text=True,
@@ -596,6 +614,12 @@ def _git_pull(sync_dir: Path) -> bool:
             capture_output=True,
             text=True,
             timeout=60,
+        )
+        # Ensure we're on main branch
+        subprocess.run(
+            ["git", "checkout", "-B", "main"],
+            cwd=str(sync_dir),
+            capture_output=True,
         )
         subprocess.run(
             ["git", "branch", "--set-upstream-to=origin/main", "main"],
