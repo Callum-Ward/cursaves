@@ -4,14 +4,48 @@
 
 Cursor stores chats locally. Switch machines and they're gone. This tool saves your chats to a git repo so you can restore them anywhere.
 
-## Terminology
+## How It Works
+
+### Terminology
 
 | Term | Meaning |
 |------|---------|
-| **Chat** | A conversation with the AI in Cursor (also called "composer" internally) |
-| **Project** | Your code directory (e.g., `/home/user/repos/myapp`) |
-| **Workspace** | Cursor's internal reference to a project - shown by `cursaves workspaces` |
-| **Snapshot** | An exported chat saved to `~/.cursaves/snapshots/` |
+| **Chat** | A conversation with the AI in Cursor |
+| **Workspace** | Cursor creates one for each directory you open. Chats belong to workspaces. |
+| **Project ID** | How cursaves groups snapshots - based on git remote URL or directory name |
+| **Snapshot** | An exported chat saved to `~/.cursaves/snapshots/<project-id>/` |
+
+### Chat → Workspace → Project Mapping
+
+**Cursor stores chats per workspace (per directory path):**
+
+```
+/Users/alice/repos/myapp     → Workspace A → [chat1, chat2, chat3]
+/Users/bob/repos/myapp       → Workspace B → [chat4, chat5]
+ssh://core/home/user/myapp   → Workspace C → [chat6, chat7]
+```
+
+Each workspace is a unique path. Even the same repo cloned to different locations creates separate workspaces with separate chats.
+
+**cursaves groups snapshots by project identifier (git remote URL):**
+
+```
+All three workspaces above have the same git remote:
+  git@github.com:user/myapp.git
+
+So all their chats get saved to:
+  ~/.cursaves/snapshots/github.com-user-myapp/
+```
+
+**On import, cursaves matches snapshots to local workspaces by path:**
+
+```
+Machine A exports chat from: /Users/alice/repos/myapp
+Machine B imports chat into: /Users/bob/repos/myapp  (same project ID, different path)
+  → Paths in chat metadata are rewritten automatically
+```
+
+This means you can sync chats for the same repo across different machines, even if the local paths differ.
 
 ## Quick Start
 
