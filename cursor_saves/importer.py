@@ -241,6 +241,7 @@ def list_snapshot_projects(snapshots_dir: Optional[Path] = None) -> list[dict]:
 
         source_paths = set()
         source_machines = set()
+        latest_export = None
         for sf in snapshot_files:
             try:
                 data = read_snapshot_file(sf)
@@ -250,6 +251,9 @@ def list_snapshot_projects(snapshots_dir: Optional[Path] = None) -> list[dict]:
                 sm = data.get("sourceMachine", "")
                 if sm:
                     source_machines.add(sm)
+                exported_at = data.get("exportedAt", "")
+                if exported_at and (latest_export is None or exported_at > latest_export):
+                    latest_export = exported_at
             except (json.JSONDecodeError, OSError, gzip.BadGzipFile):
                 pass
 
@@ -259,6 +263,7 @@ def list_snapshot_projects(snapshots_dir: Optional[Path] = None) -> list[dict]:
             "count": len(snapshot_files),
             "source_paths": source_paths,
             "sources": source_machines,
+            "latest_export": latest_export,
         })
 
     return projects

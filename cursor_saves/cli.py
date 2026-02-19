@@ -144,6 +144,21 @@ def cmd_workspaces(args):
     print("\nUse 'cursaves push -w <number>' to push a specific workspace.")
 
 
+def _is_remote_path(path: str, source_machine: str) -> bool:
+    """Check if a path looks like it came from an SSH remote session."""
+    import platform
+    
+    # If path doesn't exist locally, it's likely remote
+    if not os.path.exists(path):
+        return True
+    
+    # On Mac, local paths start with /Users
+    if platform.system() == "Darwin" and not path.startswith("/Users"):
+        return True
+    
+    return False
+
+
 def cmd_snapshots(args):
     """List all snapshot projects available in ~/.cursaves/snapshots/."""
     _ensure_synced()  # Pull latest from remote first
@@ -155,22 +170,30 @@ def cmd_snapshots(args):
         print("Run 'cursaves push' to checkpoint and push conversations.")
         return
 
-    print(f"{'#':<4} {'Project':<40} {'Chats':>5}  {'Source Machine':<20} {'Source Path'}")
+    print(f"{'#':<4} {'Project':<35} {'Chats':>5}  {'Type':<6} {'Source':<18} {'Path'}")
     print("-" * 110)
 
     for i, p in enumerate(projects, 1):
         sources = ", ".join(sorted(p["sources"])) or "unknown"
-        # Show the most representative source path
+        
+        # Determine if SSH or local based on paths
         source_path = ""
+        ws_type = "local"
         if p["source_paths"]:
             source_path = sorted(p["source_paths"])[0]
-            if len(source_path) > 40:
-                source_path = "..." + source_path[-37:]
+            # Check if any source machine + path combo looks like SSH
+            for sp in p["source_paths"]:
+                for sm in p["sources"]:
+                    if _is_remote_path(sp, sm):
+                        ws_type = "ssh"
+                        break
+            if len(source_path) > 35:
+                source_path = "..." + source_path[-32:]
 
         name = p["name"]
-        if len(name) > 38:
-            name = name[:35] + "..."
-        print(f"{i:<4} {name:<40} {p['count']:>5}  {sources:<20} {source_path}")
+        if len(name) > 33:
+            name = name[:30] + "..."
+        print(f"{i:<4} {name:<35} {p['count']:>5}  {ws_type:<6} {sources:<18} {source_path}")
 
     print(f"\n{len(projects)} project(s) with snapshots")
     print(f"\nUse 'cursaves pull -s' to interactively select which to import.")
