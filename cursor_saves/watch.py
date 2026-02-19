@@ -78,19 +78,29 @@ def _git_sync(repo_root: Path, project_path: str) -> tuple[bool, str]:
 
     try:
         # Pull first (rebase to keep history linear)
+        # Use explicit fetch + rebase to avoid "no tracking info" failures
+        subprocess.run(
+            ["git", "fetch", "origin"],
+            capture_output=True,
+            text=True,
+            cwd=str(repo_root),
+            timeout=30,
+        )
+        # Set up tracking if not already configured
+        subprocess.run(
+            ["git", "branch", "--set-upstream-to=origin/main", "main"],
+            capture_output=True,
+            cwd=str(repo_root),
+        )
         pull_result = subprocess.run(
-            ["git", "pull", "--rebase", "--autostash"],
+            ["git", "rebase", "--autostash", "origin/main"],
             capture_output=True,
             text=True,
             cwd=str(repo_root),
             timeout=30,
         )
         if pull_result.returncode != 0:
-            # Pull failed -- maybe no remote, maybe conflict
-            if "no tracking information" in pull_result.stderr.lower():
-                pass  # No upstream set, that's fine for first push
-            elif pull_result.returncode != 0:
-                return False, f"git pull failed: {pull_result.stderr.strip()}"
+            return False, f"git pull failed: {pull_result.stderr.strip()}"
 
         # Stage snapshot files
         add_result = subprocess.run(
@@ -129,7 +139,7 @@ def _git_sync(repo_root: Path, project_path: str) -> tuple[bool, str]:
         # Push
         if _git_has_remote(repo_root):
             push_result = subprocess.run(
-                ["git", "push"],
+                ["git", "push", "-u", "origin", "HEAD"],
                 capture_output=True,
                 text=True,
                 cwd=str(repo_root),

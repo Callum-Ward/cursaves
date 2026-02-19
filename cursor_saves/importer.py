@@ -194,6 +194,137 @@ def import_snapshot(
     return True
 
 
+def list_snapshot_projects(snapshots_dir: Optional[Path] = None) -> list[dict]:
+    """List all project directories in the snapshots store.
+
+    Returns list of dicts with: name, path, count, source_paths (set of
+    sourceProjectPath values found in snapshots), sources (set of
+    sourceMachine values).
+    """
+    if snapshots_dir is None:
+        snapshots_dir = paths.get_snapshots_dir()
+
+    if not snapshots_dir.exists():
+        return []
+
+    projects = []
+    for project_dir in sorted(snapshots_dir.iterdir()):
+        if not project_dir.is_dir():
+            continue
+        snapshot_files = list(project_dir.glob("*.json"))
+        if not snapshot_files:
+            continue
+
+        source_paths = set()
+        source_machines = set()
+        for sf in snapshot_files:
+            try:
+                data = json.loads(sf.read_text())
+                sp = data.get("sourceProjectPath", "")
+                if sp:
+                    source_paths.add(sp)
+                sm = data.get("sourceMachine", "")
+                if sm:
+                    source_machines.add(sm)
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        projects.append({
+            "name": project_dir.name,
+            "path": project_dir,
+            "count": len(snapshot_files),
+            "source_paths": source_paths,
+            "sources": source_machines,
+        })
+
+    return projects
+
+
+def find_snapshot_dir_for_project(
+    target_project_path: str,
+    snapshots_dir: Optional[Path] = None,
+) -> Optional[Path]:
+    """Find the snapshot directory matching a project path.
+
+    Tries in order:
+    1. Exact match by project identifier (git remote URL based)
+    2. Basename match (for SSH workspaces where git -C fails locally)
+    3. Scan snapshot metadata for matching sourceProjectPath basenames
+
+    Returns the snapshot directory path, or None.
+    """
+    if snapshots_dir is None:
+        snapshots_dir = paths.get_snapshots_dir()
+
+    # 1. Exact match by project identifier
+    project_id = paths.get_project_identifier(target_project_path)
+    exact = snapshots_dir / project_id
+    if exact.exists() and list(exact.glob("*.json")):
+        return exact
+
+    # 2. Basename match (covers SSH workspace push → local pull)
+    basename = os.path.basename(os.path.normpath(target_project_path))
+    basename_dir = snapshots_dir / basename
+    if basename_dir.exists() and basename_dir != exact and list(basename_dir.glob("*.json")):
+        return basename_dir
+
+    # 3. Scan snapshot dirs for matching source path basenames
+    # This handles the case where the project was pushed from a different
+    # machine with a different directory structure but same repo
+    for project_dir in snapshots_dir.iterdir():
+        if not project_dir.is_dir() or project_dir == exact or project_dir == basename_dir:
+            continue
+        # Check first snapshot file for a matching source path basename
+        for sf in project_dir.glob("*.json"):
+            try:
+                data = json.loads(sf.read_text())
+                source_path = data.get("sourceProjectPath", "")
+                if source_path and os.path.basename(os.path.normpath(source_path)) == basename:
+                    return project_dir
+            except (json.JSONDecodeError, OSError):
+                pass
+            break  # Only need to check one file per directory
+
+    return None
+
+
+def import_from_snapshot_dir(
+    snapshot_dir: Path,
+    target_project_path: str,
+    force: bool = False,
+) -> tuple[int, int]:
+    """Import all snapshots from a specific snapshot directory.
+
+    Returns (success_count, failure_count).
+    """
+    if not force and is_cursor_running():
+        print(
+            "Warning: Cursor is running. Imports will write to Cursor's database,\n"
+            "but Cursor won't see the changes until you reload the window\n"
+            "(Cmd+Shift+P -> 'Reload Window').\n"
+            "Use --force to suppress this warning.\n",
+            file=sys.stderr,
+        )
+
+    snapshot_files = sorted(snapshot_dir.glob("*.json"))
+    if not snapshot_files:
+        return 0, 0
+
+    success = 0
+    failure = 0
+
+    for sf in snapshot_files:
+        print(f"Importing {sf.name}...")
+        if import_snapshot(sf, target_project_path):
+            success += 1
+            print(f"  OK")
+        else:
+            failure += 1
+            print(f"  FAILED")
+
+    return success, failure
+
+
 def import_all_snapshots(
     target_project_path: str,
     snapshots_dir: Optional[Path] = None,
@@ -216,39 +347,20 @@ def import_all_snapshots(
     if snapshots_dir is None:
         snapshots_dir = paths.get_snapshots_dir()
 
-    project_id = paths.get_project_identifier(target_project_path)
-    project_snapshots = snapshots_dir / project_id
+    project_snapshots = find_snapshot_dir_for_project(target_project_path, snapshots_dir)
 
-    # Fallback: also check the old basename-based directory for v1 snapshots
-    if not project_snapshots.exists():
-        basename_dir = snapshots_dir / os.path.basename(os.path.normpath(target_project_path))
-        if basename_dir.exists() and basename_dir != project_snapshots:
-            print(
-                f"Note: No snapshots at {project_id}/, "
-                f"falling back to {basename_dir.name}/",
-                file=sys.stderr,
-            )
-            project_snapshots = basename_dir
-
-    if not project_snapshots.exists():
+    if not project_snapshots:
+        project_id = paths.get_project_identifier(target_project_path)
         print(f"No snapshots found for project '{project_id}'", file=sys.stderr)
+        print(f"Run 'cursaves snapshots' to see available snapshot projects.", file=sys.stderr)
         return 0, 0
 
-    snapshot_files = sorted(project_snapshots.glob("*.json"))
-    if not snapshot_files:
-        print(f"No snapshot files found in {project_snapshots}", file=sys.stderr)
-        return 0, 0
+    project_id = paths.get_project_identifier(target_project_path)
+    if project_snapshots.name != project_id:
+        print(
+            f"Note: Matched snapshots at {project_snapshots.name}/ "
+            f"(looked for {project_id})",
+            file=sys.stderr,
+        )
 
-    success = 0
-    failure = 0
-
-    for sf in snapshot_files:
-        print(f"Importing {sf.name}...")
-        if import_snapshot(sf, target_project_path):
-            success += 1
-            print(f"  OK")
-        else:
-            failure += 1
-            print(f"  FAILED")
-
-    return success, failure
+    return import_from_snapshot_dir(project_snapshots, target_project_path, force=force)
