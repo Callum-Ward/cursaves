@@ -530,6 +530,39 @@ def _git_pull_quiet(sync_dir: Path) -> bool:
         return False
 
 
+def _git_commit_and_push(sync_dir: Path, message: str) -> bool:
+    """Add all changes, commit, and push. Returns True if changes were pushed."""
+    from .watch import _git_has_remote
+
+    # Stage all changes (including deletions)
+    subprocess.run(["git", "add", "-A"], cwd=str(sync_dir), capture_output=True)
+
+    # Check if there's anything to commit
+    result = subprocess.run(
+        ["git", "diff", "--cached", "--quiet"],
+        cwd=str(sync_dir),
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        return False  # Nothing to commit
+
+    # Commit
+    subprocess.run(["git", "commit", "-m", message], cwd=str(sync_dir), capture_output=True)
+
+    # Push if remote exists
+    if _git_has_remote(sync_dir):
+        push_result = subprocess.run(
+            ["git", "push", "-u", "origin", "HEAD"],
+            cwd=str(sync_dir),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return push_result.returncode == 0
+
+    return True
+
+
 def _git_pull(sync_dir: Path) -> bool:
     """Fetch and rebase from remote. Returns True on success."""
     from .watch import _git_has_remote
@@ -736,10 +769,18 @@ def cmd_status(args):
 
 
 def cmd_delete(args):
-    """Delete cached snapshots."""
+    """Delete cached snapshots and sync to remote."""
     import shutil
+    from .watch import _git_has_remote
 
+    sync_dir = paths.get_sync_dir()
     snapshots_base = paths.get_snapshots_dir()
+
+    # Pull from remote first to avoid conflicts
+    if sync_dir.exists() and _git_has_remote(sync_dir):
+        _git_pull_quiet(sync_dir)
+
+    deleted_any = False
 
     # --all-projects: delete everything
     if args.all_projects:
@@ -767,6 +808,12 @@ def cmd_delete(args):
             print(f"  Deleted: {p['name']}/ ({p['count']} snapshots)")
 
         print(f"\nDeleted {total_count} snapshot(s) across {len(projects)} project(s).")
+
+        # Sync deletion to remote
+        if sync_dir.exists() and _git_has_remote(sync_dir):
+            hostname = paths.get_machine_id()
+            if _git_commit_and_push(sync_dir, f"[{hostname}] delete all snapshots"):
+                print("Synced to remote.")
         return
 
     # --select: interactive selection across projects
@@ -802,13 +849,24 @@ def cmd_delete(args):
             return
 
         total_deleted = 0
+        deleted_names = []
         for idx in indices:
             p = projects[idx - 1]
             shutil.rmtree(p["path"])
             print(f"  Deleted: {p['name']}/ ({p['count']} snapshots)")
             total_deleted += p["count"]
+            deleted_names.append(p["name"])
 
         print(f"\nDeleted {total_deleted} snapshot(s) across {len(indices)} project(s).")
+
+        # Sync deletion to remote
+        if sync_dir.exists() and _git_has_remote(sync_dir):
+            hostname = paths.get_machine_id()
+            msg = f"[{hostname}] delete {', '.join(deleted_names[:3])}"
+            if len(deleted_names) > 3:
+                msg += f" +{len(deleted_names) - 3} more"
+            if _git_commit_and_push(sync_dir, msg):
+                print("Synced to remote.")
         return
 
     # Single project mode (original behavior)
@@ -842,6 +900,12 @@ def cmd_delete(args):
         for f in snapshot_files:
             f.unlink()
         print(f"Deleted {count} snapshot(s).")
+
+        # Sync deletion to remote
+        if sync_dir.exists() and _git_has_remote(sync_dir):
+            hostname = paths.get_machine_id()
+            if _git_commit_and_push(sync_dir, f"[{hostname}] delete all from {project_id}"):
+                print("Synced to remote.")
         return
 
     if args.id:
@@ -861,6 +925,12 @@ def cmd_delete(args):
         match = matches[0]
         match.unlink()
         print(f"Deleted {match.stem}")
+
+        # Sync deletion to remote
+        if sync_dir.exists() and _git_has_remote(sync_dir):
+            hostname = paths.get_machine_id()
+            if _git_commit_and_push(sync_dir, f"[{hostname}] delete {match.stem[:12]}"):
+                print("Synced to remote.")
         return
 
     # Interactive mode: list and select snapshots for current project
@@ -896,11 +966,19 @@ def cmd_delete(args):
     if not indices:
         return
 
+    deleted_names = []
     for idx in indices:
         snapshot_info[idx - 1]["file"].unlink()
         print(f"  Deleted: {snapshot_info[idx - 1]['name']}")
+        deleted_names.append(snapshot_info[idx - 1]["name"])
 
     print(f"\nDeleted {len(indices)} snapshot(s).")
+
+    # Sync deletion to remote
+    if sync_dir.exists() and _git_has_remote(sync_dir):
+        hostname = paths.get_machine_id()
+        if _git_commit_and_push(sync_dir, f"[{hostname}] delete {len(indices)} from {project_id}"):
+            print("Synced to remote.")
 
 
 def main():
