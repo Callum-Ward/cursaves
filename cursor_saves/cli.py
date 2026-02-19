@@ -19,57 +19,62 @@ from .reload import print_reload_hint
 from .watch import watch_loop
 
 
-def _ensure_repo_healthy(sync_dir: Path) -> None:
-    """Ensure the sync repo is in a healthy state (on main branch, upstream set)."""
-    if not sync_dir.exists():
-        return
+def _git_reset_to_origin(sync_dir: Path) -> bool:
+    """Reset hard to origin/main. Remote is always ground truth. Returns True on success."""
+    from .watch import _git_has_remote
 
-    # Check if a rebase is in progress and abort it
+    if not sync_dir.exists():
+        return False
+
+    # Abort any in-progress rebase
     rebase_dir = sync_dir / ".git" / "rebase-merge"
     rebase_apply_dir = sync_dir / ".git" / "rebase-apply"
     if rebase_dir.exists() or rebase_apply_dir.exists():
-        subprocess.run(
-            ["git", "rebase", "--abort"],
+        subprocess.run(["git", "rebase", "--abort"], cwd=str(sync_dir), capture_output=True)
+
+    if not _git_has_remote(sync_dir):
+        # No remote, just ensure we're on main
+        subprocess.run(["git", "checkout", "-B", "main"], cwd=str(sync_dir), capture_output=True)
+        return True
+
+    try:
+        # Fetch latest from origin
+        fetch_result = subprocess.run(
+            ["git", "fetch", "origin"],
             cwd=str(sync_dir),
             capture_output=True,
+            text=True,
+            timeout=60,
         )
+        if fetch_result.returncode != 0:
+            return False
 
-    # Check if we're on main branch
-    result = subprocess.run(
-        ["git", "symbolic-ref", "--short", "HEAD"],
-        cwd=str(sync_dir),
-        capture_output=True,
-        text=True,
-    )
-    current_branch = result.stdout.strip() if result.returncode == 0 else None
-
-    if current_branch != "main":
-        # Fix: checkout/create main branch
+        # Reset hard to origin/main (remote is ground truth)
         subprocess.run(
             ["git", "checkout", "-B", "main"],
             cwd=str(sync_dir),
             capture_output=True,
         )
-
-    # Ensure upstream is set (if remote exists)
-    from .watch import _git_has_remote
-    if _git_has_remote(sync_dir):
+        subprocess.run(
+            ["git", "reset", "--hard", "origin/main"],
+            cwd=str(sync_dir),
+            capture_output=True,
+        )
         subprocess.run(
             ["git", "branch", "--set-upstream-to=origin/main", "main"],
             cwd=str(sync_dir),
             capture_output=True,
         )
+        return True
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def _ensure_synced() -> None:
-    """Pull from remote to ensure we have the latest state."""
-    from .watch import _git_has_remote
-
+    """Reset to origin to ensure we have the latest state. Remote is ground truth."""
     sync_dir = paths.get_sync_dir()
     if sync_dir.exists():
-        _ensure_repo_healthy(sync_dir)
-        if _git_has_remote(sync_dir):
-            _git_pull_quiet(sync_dir)
+        _git_reset_to_origin(sync_dir)
 
 
 def _resolve_project(args) -> str:
@@ -486,11 +491,10 @@ def cmd_push(args):
 
     sync_dir = _require_sync_repo()
 
-    # Step 0: Ensure repo is healthy, then pull from remote
-    _ensure_repo_healthy(sync_dir)
+    # Step 0: Reset to origin (remote is ground truth)
     if _git_has_remote(sync_dir):
-        if not _git_pull_quiet(sync_dir):
-            print("Warning: Could not pull from remote, continuing anyway...", file=sys.stderr)
+        if not _git_reset_to_origin(sync_dir):
+            print("Warning: Could not sync with remote, continuing anyway...", file=sys.stderr)
 
     # Interactive selection mode: pick workspace, then conversations
     composer_ids = None
@@ -542,12 +546,6 @@ def cmd_push(args):
     if _git_has_remote(sync_dir):
         print("  Pushing...", end="", flush=True)
         try:
-            # Ensure we're on main branch first
-            subprocess.run(
-                ["git", "checkout", "-B", "main"],
-                cwd=str(sync_dir),
-                capture_output=True,
-            )
             push_result = subprocess.run(
                 ["git", "push", "-u", "origin", "main"],
                 cwd=str(sync_dir),
@@ -568,36 +566,8 @@ def cmd_push(args):
 
 
 def _git_pull_quiet(sync_dir: Path) -> bool:
-    """Fetch and rebase from remote without printing status. Returns True on success."""
-    try:
-        subprocess.run(
-            ["git", "fetch", "origin"],
-            cwd=str(sync_dir),
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        # Ensure we're on main branch
-        subprocess.run(
-            ["git", "checkout", "-B", "main"],
-            cwd=str(sync_dir),
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "branch", "--set-upstream-to=origin/main", "main"],
-            cwd=str(sync_dir),
-            capture_output=True,
-        )
-        result = subprocess.run(
-            ["git", "rebase", "--autostash", "origin/main"],
-            cwd=str(sync_dir),
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return False
+    """Reset to origin without printing status. Returns True on success."""
+    return _git_reset_to_origin(sync_dir)
 
 
 def _git_commit_and_push(sync_dir: Path, message: str) -> bool:
@@ -622,12 +592,6 @@ def _git_commit_and_push(sync_dir: Path, message: str) -> bool:
     # Push if remote exists
     if _git_has_remote(sync_dir):
         try:
-            # Ensure we're on main branch first
-            subprocess.run(
-                ["git", "checkout", "-B", "main"],
-                cwd=str(sync_dir),
-                capture_output=True,
-            )
             push_result = subprocess.run(
                 ["git", "push", "-u", "origin", "main"],
                 cwd=str(sync_dir),
@@ -644,49 +608,19 @@ def _git_commit_and_push(sync_dir: Path, message: str) -> bool:
 
 
 def _git_pull(sync_dir: Path) -> bool:
-    """Fetch and rebase from remote. Returns True on success."""
+    """Reset to origin/main. Remote is ground truth. Returns True on success."""
     from .watch import _git_has_remote
 
     if not _git_has_remote(sync_dir):
         print("No git remote configured, importing from local snapshots only.")
         return True
 
-    print("Pulling latest snapshots...", end="", flush=True)
-    try:
-        subprocess.run(
-            ["git", "fetch", "origin"],
-            cwd=str(sync_dir),
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        # Ensure we're on main branch
-        subprocess.run(
-            ["git", "checkout", "-B", "main"],
-            cwd=str(sync_dir),
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "branch", "--set-upstream-to=origin/main", "main"],
-            cwd=str(sync_dir),
-            capture_output=True,
-        )
-        pull_result = subprocess.run(
-            ["git", "rebase", "--autostash", "origin/main"],
-            cwd=str(sync_dir),
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except subprocess.TimeoutExpired:
-        print(" timed out", file=sys.stderr)
-        return False
-
-    if pull_result.returncode == 0:
+    print("Syncing with remote...", end="", flush=True)
+    if _git_reset_to_origin(sync_dir):
         print(" done")
         return True
     else:
-        print(f" failed: {pull_result.stderr.strip()}", file=sys.stderr)
+        print(" failed", file=sys.stderr)
         return False
 
 
@@ -868,10 +802,9 @@ def cmd_delete(args):
     sync_dir = paths.get_sync_dir()
     snapshots_base = paths.get_snapshots_dir()
 
-    # Ensure repo is healthy, then pull from remote
-    _ensure_repo_healthy(sync_dir)
+    # Reset to origin (remote is ground truth)
     if sync_dir.exists() and _git_has_remote(sync_dir):
-        _git_pull_quiet(sync_dir)
+        _git_reset_to_origin(sync_dir)
 
     deleted_any = False
 
