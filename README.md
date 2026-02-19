@@ -283,33 +283,27 @@ When you connect to a remote server via Cursor's SSH feature, **chats are stored
 **Pushing from SSH workspaces:**
 
 ```bash
-# Option 1: Interactive selection (recommended)
+# Interactive selection (recommended)
 cursaves push -s
-#  → Shows all workspaces, lets you pick which chats to push
+#  → Shows all workspaces (local + SSH), lets you pick which chats to push
 
-# Option 2: By workspace number
-cursaves workspaces          # Find the workspace number
+# Or by workspace number
+cursaves workspaces          # List workspaces and find the number
 cursaves push -w 3           # Push from workspace #3
-
-# Option 3: By path (must match exactly)
-cursaves push -p /home/user/repos/myapp
 ```
 
 **Pulling into SSH workspaces:**
 
 ```bash
-# Option 1: Interactive selection (recommended)
+# Interactive selection (recommended)
 cursaves pull -s
-#  → Shows available snapshots
+#  → Shows available snapshots by project
 #  → Auto-detects matching SSH workspaces
 #  → Imports into the correct workspace
 
-# Option 2: By workspace number
-cursaves workspaces          # Find the workspace number
+# Or by workspace number
+cursaves workspaces          # List workspaces and find the number
 cursaves pull -w 3           # Pull into workspace #3
-
-# Option 3: By path
-cursaves pull -p /home/user/repos/myapp
 ```
 
 **Important:** Run these commands in a **local terminal**, not in Cursor's integrated terminal (which runs on the remote server).
