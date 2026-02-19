@@ -9,6 +9,7 @@ from pathlib import Path
 
 from . import __version__, export, paths
 from .importer import import_all_snapshots, import_snapshot
+from .reload import print_reload_hint, reload_cursor_window
 from .watch import watch_loop
 
 
@@ -228,7 +229,7 @@ def cmd_import(args):
         )
         print(f"\nDone: {success} imported, {failure} failed.")
         if success > 0:
-            print("Reload Cursor window (Cmd+Shift+P -> 'Reload Window') to see them.")
+            _maybe_reload(args)
     elif args.file:
         snapshot_path = Path(args.file)
         if not snapshot_path.exists():
@@ -236,13 +237,42 @@ def cmd_import(args):
             sys.exit(1)
         print(f"Importing {snapshot_path.name}...")
         if import_snapshot(snapshot_path, project_path):
-            print("Done. Reload Cursor window to see the imported conversation.")
+            print("Done.")
+            _maybe_reload(args)
         else:
             print("Import failed.", file=sys.stderr)
             sys.exit(1)
     else:
         print("Error: Specify --all or --file <path>", file=sys.stderr)
         sys.exit(1)
+
+
+def _maybe_reload(args):
+    """Attempt Cursor window reload if --reload was passed, otherwise print hint."""
+    if getattr(args, "reload", False):
+        print("Reloading Cursor window...", end="", flush=True)
+        if reload_cursor_window():
+            print(" done")
+        else:
+            print(" could not auto-reload")
+            print_reload_hint()
+    else:
+        print_reload_hint()
+
+
+def cmd_reload(args):
+    """Trigger a Cursor window reload to pick up database changes."""
+    print("Reloading Cursor window...", end="", flush=True)
+    if reload_cursor_window():
+        print(" done")
+    else:
+        print(" could not auto-reload")
+        print_reload_hint()
+        print(
+            "\nNote: Auto-reload requires xdotool (Linux) or osascript (macOS).\n"
+            "Install xdotool: sudo apt install xdotool  (Debian/Ubuntu)\n"
+            "                  sudo dnf install xdotool  (Fedora)"
+        )
 
 
 def _require_sync_repo():
@@ -259,16 +289,148 @@ def _require_sync_repo():
     return paths.get_sync_dir()
 
 
+def _parse_selection(choice: str, max_items: int) -> list[int]:
+    """Parse a user selection string into a list of 1-based indices.
+
+    Supports: 1,3,5 and 1-3 and combinations like 1-3,5 and 'all'.
+    Returns sorted list of valid indices, or empty list on error.
+    """
+    if choice.lower() == "all":
+        return list(range(1, max_items + 1))
+
+    selected = set()
+    for part in choice.split(","):
+        part = part.strip()
+        if "-" in part:
+            try:
+                start, end = part.split("-", 1)
+                for i in range(int(start), int(end) + 1):
+                    selected.add(i)
+            except ValueError:
+                print(f"Invalid range: {part}", file=sys.stderr)
+                return []
+        else:
+            try:
+                selected.add(int(part))
+            except ValueError:
+                print(f"Invalid number: {part}", file=sys.stderr)
+                return []
+
+    # Filter to valid range
+    valid = sorted(i for i in selected if 1 <= i <= max_items)
+    invalid = sorted(i for i in selected if i < 1 or i > max_items)
+    for i in invalid:
+        print(f"Warning: #{i} out of range, skipping.", file=sys.stderr)
+
+    return valid
+
+
+def _select_workspace() -> str | None:
+    """Show all Cursor workspaces and let the user pick one.
+
+    Returns the project path for the selected workspace, or None.
+    """
+    workspaces = paths.list_all_workspaces()
+    if not workspaces:
+        print("No Cursor workspaces found.")
+        return None
+
+    print(f"\nCursor workspaces (most recent first)\n")
+    print(f"  {'#':<4} {'Project':<50} {'Path'}")
+    print(f"  {'-' * 90}")
+
+    for i, ws in enumerate(workspaces, 1):
+        name = ws["name"]
+        path = ws["path"]
+        if len(path) > 50:
+            path = "..." + path[-47:]
+        print(f"  {i:<4} {name:<50} {path}")
+
+    print(f"\nSelect a workspace:")
+    try:
+        choice = input("> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+
+    if not choice:
+        return None
+
+    try:
+        idx = int(choice)
+    except ValueError:
+        print(f"Invalid selection: {choice}", file=sys.stderr)
+        return None
+
+    if idx < 1 or idx > len(workspaces):
+        print(f"#{idx} out of range.", file=sys.stderr)
+        return None
+
+    return workspaces[idx - 1]["path"]
+
+
+def _select_conversations(project_path: str) -> list[str]:
+    """Show conversations for a workspace and let the user pick.
+
+    Returns a list of selected composer IDs, or empty list.
+    """
+    conversations = export.list_conversations(project_path)
+    if not conversations:
+        print(f"No conversations found for {project_path}")
+        return []
+
+    conversations.sort(key=lambda c: c.get("lastUpdated", ""), reverse=True)
+
+    print(f"\nConversations for {project_path}\n")
+    print(f"  {'#':<4} {'Name':<35} {'Mode':<8} {'Msgs':>5}  {'Last Updated'}")
+    print(f"  {'-' * 85}")
+
+    for i, c in enumerate(conversations, 1):
+        name = c["name"]
+        if len(name) > 33:
+            name = name[:30] + "..."
+        print(
+            f"  {i:<4} {name:<35} {c['mode']:<8} {c['messageCount']:>5}  {c['lastUpdated']}"
+        )
+
+    print(f"\nSelect conversations to push (e.g. 1,3,5 or 1-3 or 'all'):")
+    try:
+        choice = input("> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return []
+
+    if not choice:
+        return []
+
+    indices = _parse_selection(choice, len(conversations))
+    return [conversations[i - 1]["id"] for i in indices]
+
+
 def cmd_push(args):
     """Checkpoint + git commit + push in one command."""
     from .watch import _git_has_remote
 
     sync_dir = _require_sync_repo()
-    project_path = _resolve_project(args)
+    # Interactive selection mode: pick workspace, then conversations
+    composer_ids = None
+    if args.select:
+        project_path = _select_workspace()
+        if not project_path:
+            return
+        composer_ids = _select_conversations(project_path)
+        if not composer_ids:
+            print("No conversations selected.")
+            return
+    else:
+        project_path = _resolve_project(args)
 
     # Step 1: Checkpoint
-    print(f"Checkpointing conversations for {project_path}...")
-    saved = export.checkpoint_project(project_path)
+    if composer_ids:
+        print(f"\nCheckpointing {len(composer_ids)} selected conversation(s)...")
+    else:
+        print(f"Checkpointing conversations for {project_path}...")
+    saved = export.checkpoint_project(project_path, composer_ids=composer_ids)
 
     if not saved:
         print("No conversations found to checkpoint.")
@@ -354,7 +516,7 @@ def cmd_pull(args):
 
     print(f"\nDone: {success} imported, {failure} failed.")
     if success > 0:
-        print("Reload Cursor window (Cmd+Shift+P -> 'Reload Window') to see them.")
+        _maybe_reload(args)
 
 
 def cmd_watch(args):
@@ -407,6 +569,99 @@ def cmd_status(args):
         print(f"\nSnapshot only (run 'import --all' to import):")
         for sid in sorted(only_snapshot):
             print(f"  {sid[:12]}...")
+
+
+def cmd_delete(args):
+    """Delete cached snapshots."""
+    project_path = args.project or paths.get_project_path()
+    project_id = paths.get_project_identifier(project_path)
+    snapshots_dir = paths.get_snapshots_dir() / project_id
+
+    if not snapshots_dir.exists():
+        print(f"No snapshots found for {project_path}")
+        return
+
+    snapshot_files = sorted(snapshots_dir.glob("*.json"))
+    if not snapshot_files:
+        print(f"No snapshots found for {project_path}")
+        return
+
+    if args.all:
+        # Delete all snapshots for this project
+        count = len(snapshot_files)
+        if not args.yes:
+            print(f"This will delete {count} snapshot(s) from {snapshots_dir}")
+            try:
+                confirm = input("Continue? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return
+            if confirm not in ("y", "yes"):
+                print("Cancelled.")
+                return
+
+        for f in snapshot_files:
+            f.unlink()
+        print(f"Deleted {count} snapshot(s).")
+        return
+
+    if args.id:
+        # Delete a specific snapshot by ID (supports partial match)
+        target = args.id
+        matches = [f for f in snapshot_files if f.stem.startswith(target)]
+        if not matches:
+            print(f"No snapshot matching '{target}' found.", file=sys.stderr)
+            sys.exit(1)
+        if len(matches) > 1:
+            print(f"Multiple snapshots match '{target}':", file=sys.stderr)
+            for f in matches:
+                print(f"  {f.stem}", file=sys.stderr)
+            print("Be more specific.", file=sys.stderr)
+            sys.exit(1)
+
+        match = matches[0]
+        match.unlink()
+        print(f"Deleted {match.stem}")
+        return
+
+    # Interactive mode: list and select
+    print(f"\nCached snapshots for {project_path}\n")
+    snapshot_info = []
+    for i, f in enumerate(snapshot_files, 1):
+        try:
+            data = json.loads(f.read_text())
+            name = data.get("composerData", {}).get("name", "Untitled")
+            exported_at = data.get("exportedAt", "unknown")
+            source = data.get("sourceMachine", "unknown")
+        except (json.JSONDecodeError, OSError):
+            name = "Untitled"
+            exported_at = "unknown"
+            source = "unknown"
+
+        if len(name) > 33:
+            name = name[:30] + "..."
+        snapshot_info.append({"file": f, "name": name, "exported_at": exported_at, "source": source})
+        print(f"  {i:<4} {name:<35} {exported_at[:19]:<20} from {source}")
+
+    print(f"\nEnter numbers to delete (e.g. 1,3,5 or 1-3 or 'all'):")
+    try:
+        choice = input("> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+
+    if not choice:
+        return
+
+    indices = _parse_selection(choice, len(snapshot_info))
+    if not indices:
+        return
+
+    for idx in indices:
+        snapshot_info[idx - 1]["file"].unlink()
+        print(f"  Deleted: {snapshot_info[idx - 1]['name']}")
+
+    print(f"\nDeleted {len(indices)} snapshot(s).")
 
 
 def main():
@@ -472,6 +727,10 @@ def main():
         "--force", action="store_true",
         help="Suppress the Cursor-running warning",
     )
+    p_import.add_argument(
+        "--reload", action="store_true",
+        help="Auto-reload Cursor window after import (requires xdotool on Linux)",
+    )
     p_import.set_defaults(func=cmd_import)
 
     # ── push ────────────────────────────────────────────────────────
@@ -479,6 +738,10 @@ def main():
         "push", help="Checkpoint + commit + push (one command to save and sync)"
     )
     add_project_args(p_push)
+    p_push.add_argument(
+        "--select", "-s", action="store_true",
+        help="Interactively select which conversations to push",
+    )
     p_push.set_defaults(func=cmd_push)
 
     # ── pull ────────────────────────────────────────────────────────
@@ -490,7 +753,30 @@ def main():
         "--force", action="store_true",
         help="Suppress the Cursor-running warning",
     )
+    p_pull.add_argument(
+        "--reload", action="store_true",
+        help="Auto-reload Cursor window after import (requires xdotool on Linux)",
+    )
     p_pull.set_defaults(func=cmd_pull)
+
+    # ── reload ─────────────────────────────────────────────────────
+    p_reload = subparsers.add_parser(
+        "reload", help="Trigger a Cursor window reload to pick up imported conversations"
+    )
+    p_reload.set_defaults(func=cmd_reload)
+
+    # ── delete ─────────────────────────────────────────────────────
+    p_delete = subparsers.add_parser(
+        "delete", help="Delete cached snapshots"
+    )
+    p_delete.add_argument("--project", "-p", help="Project path (default: current directory)")
+    p_delete.add_argument("--all", action="store_true", help="Delete all snapshots for the project")
+    p_delete.add_argument("--id", help="Delete a specific snapshot by ID (supports partial match)")
+    p_delete.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Skip confirmation prompt",
+    )
+    p_delete.set_defaults(func=cmd_delete)
 
     # ── status ──────────────────────────────────────────────────────
     p_status = subparsers.add_parser("status", help="Show sync status")
@@ -522,11 +808,14 @@ def main():
             "\n"
             "Commands:\n"
             "  push          Checkpoint + commit + push to remote\n"
+            "  push -s       Interactively select conversations to push\n"
             "  pull          Pull from remote + import into Cursor\n"
             "  init          Initialize ~/.cursaves/ sync repo\n"
             "  workspaces    List all Cursor workspaces (local + SSH)\n"
             "  list          List conversations for a project\n"
             "  status        Show sync status (local vs snapshots)\n"
+            "  reload        Trigger Cursor to reload and pick up changes\n"
+            "  delete        Delete cached snapshots (interactive or by ID)\n"
             "  export <id>   Export a single conversation\n"
             "  checkpoint    Export all conversations (no git)\n"
             "  import        Import snapshots (no git)\n"
@@ -536,7 +825,10 @@ def main():
             "  -w <number>   Select workspace by number (from 'cursaves workspaces')\n"
             "  -p <path>     Specify project path directly\n"
             "\n"
-            "Run 'cursaves <command> --help' for details on a specific command."
+            "Run 'cursaves <command> --help' for details on a specific command.\n"
+            "\n"
+            "Update:\n"
+            "  uv tool upgrade cursaves"
         )
         sys.exit(1)
 
