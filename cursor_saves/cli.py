@@ -19,6 +19,15 @@ from .reload import print_reload_hint
 from .watch import watch_loop
 
 
+def _ensure_synced() -> None:
+    """Pull from remote to ensure we have the latest state."""
+    from .watch import _git_has_remote
+
+    sync_dir = paths.get_sync_dir()
+    if sync_dir.exists() and _git_has_remote(sync_dir):
+        _git_pull_quiet(sync_dir)
+
+
 def _resolve_project(args) -> str:
     """Resolve the project path from --workspace, --project, or cwd."""
     if hasattr(args, "workspace") and args.workspace:
@@ -66,6 +75,7 @@ def cmd_workspaces(args):
 
 def cmd_snapshots(args):
     """List all snapshot projects available in ~/.cursaves/snapshots/."""
+    _ensure_synced()  # Pull latest from remote first
     snapshots_dir = paths.get_snapshots_dir()
     projects = list_snapshot_projects(snapshots_dir)
 
@@ -729,6 +739,7 @@ def cmd_watch(args):
 
 def cmd_status(args):
     """Show sync status -- what's local vs what's in snapshots."""
+    _ensure_synced()  # Pull latest from remote first
     project_path = _resolve_project(args)
     project_id = paths.get_project_identifier(project_path)
     snapshots_dir = paths.get_snapshots_dir() / project_id
