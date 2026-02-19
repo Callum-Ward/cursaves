@@ -431,6 +431,12 @@ def cmd_push(args):
     from .watch import _git_has_remote
 
     sync_dir = _require_sync_repo()
+
+    # Step 0: Pull from remote first to sync with other machines
+    if _git_has_remote(sync_dir):
+        if not _git_pull_quiet(sync_dir):
+            print("Warning: Could not pull from remote, continuing anyway...", file=sys.stderr)
+
     # Interactive selection mode: pick workspace, then conversations
     composer_ids = None
     if args.select:
@@ -495,6 +501,33 @@ def cmd_push(args):
         print("  No remote configured, skipping push")
 
     print(f"\nDone. {len(saved)} conversation(s) saved and pushed.")
+
+
+def _git_pull_quiet(sync_dir: Path) -> bool:
+    """Fetch and rebase from remote without printing status. Returns True on success."""
+    try:
+        subprocess.run(
+            ["git", "fetch", "origin"],
+            cwd=str(sync_dir),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        subprocess.run(
+            ["git", "branch", "--set-upstream-to=origin/main", "main"],
+            cwd=str(sync_dir),
+            capture_output=True,
+        )
+        result = subprocess.run(
+            ["git", "rebase", "--autostash", "origin/main"],
+            cwd=str(sync_dir),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
 
 
 def _git_pull(sync_dir: Path) -> bool:
@@ -704,9 +737,84 @@ def cmd_status(args):
 
 def cmd_delete(args):
     """Delete cached snapshots."""
+    import shutil
+
+    snapshots_base = paths.get_snapshots_dir()
+
+    # --all-projects: delete everything
+    if args.all_projects:
+        projects = list_snapshot_projects(snapshots_base)
+        if not projects:
+            print("No snapshots found.")
+            return
+
+        total_count = sum(p["count"] for p in projects)
+        if not args.yes:
+            print(f"This will delete {total_count} snapshot(s) across {len(projects)} project(s):")
+            for p in projects:
+                print(f"  {p['name']}: {p['count']} snapshot(s)")
+            try:
+                confirm = input("\nContinue? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return
+            if confirm not in ("y", "yes"):
+                print("Cancelled.")
+                return
+
+        for p in projects:
+            shutil.rmtree(p["path"])
+            print(f"  Deleted: {p['name']}/ ({p['count']} snapshots)")
+
+        print(f"\nDeleted {total_count} snapshot(s) across {len(projects)} project(s).")
+        return
+
+    # --select: interactive selection across projects
+    if args.select:
+        projects = list_snapshot_projects(snapshots_base)
+        if not projects:
+            print("No snapshots found.")
+            return
+
+        print(f"\nSnapshot projects:\n")
+        print(f"  {'#':<4} {'Project':<40} {'Chats':>5}  {'Source'}")
+        print(f"  {'-' * 70}")
+
+        for i, p in enumerate(projects, 1):
+            sources = ", ".join(sorted(p["sources"])) or "unknown"
+            name = p["name"]
+            if len(name) > 38:
+                name = name[:35] + "..."
+            print(f"  {i:<4} {name:<40} {p['count']:>5}  {sources}")
+
+        print(f"\nSelect project(s) to delete (e.g. 1,3 or 1-3 or 'all'):")
+        try:
+            choice = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+
+        if not choice:
+            return
+
+        indices = _parse_selection(choice, len(projects))
+        if not indices:
+            return
+
+        total_deleted = 0
+        for idx in indices:
+            p = projects[idx - 1]
+            shutil.rmtree(p["path"])
+            print(f"  Deleted: {p['name']}/ ({p['count']} snapshots)")
+            total_deleted += p["count"]
+
+        print(f"\nDeleted {total_deleted} snapshot(s) across {len(indices)} project(s).")
+        return
+
+    # Single project mode (original behavior)
     project_path = args.project or paths.get_project_path()
     project_id = paths.get_project_identifier(project_path)
-    snapshots_dir = paths.get_snapshots_dir() / project_id
+    snapshots_dir = snapshots_base / project_id
 
     if not snapshots_dir.exists():
         print(f"No snapshots found for {project_path}")
@@ -755,7 +863,7 @@ def cmd_delete(args):
         print(f"Deleted {match.stem}")
         return
 
-    # Interactive mode: list and select
+    # Interactive mode: list and select snapshots for current project
     print(f"\nCached snapshots for {project_path}\n")
     snapshot_info = []
     for i, f in enumerate(snapshot_files, 1):
@@ -913,6 +1021,14 @@ def main():
     p_delete.add_argument("--project", "-p", help="Project path (default: current directory)")
     p_delete.add_argument("--all", action="store_true", help="Delete all snapshots for the project")
     p_delete.add_argument("--id", help="Delete a specific snapshot by ID (supports partial match)")
+    p_delete.add_argument(
+        "--select", "-s", action="store_true",
+        help="Interactively select which project(s) to delete",
+    )
+    p_delete.add_argument(
+        "--all-projects", action="store_true",
+        help="Delete ALL snapshots across ALL projects",
+    )
     p_delete.add_argument(
         "--yes", "-y", action="store_true",
         help="Skip confirmation prompt",
