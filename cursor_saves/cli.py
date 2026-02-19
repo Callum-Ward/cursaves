@@ -14,7 +14,19 @@ from .importer import (
     import_from_snapshot_dir,
     import_snapshot,
     list_snapshot_projects,
+    list_snapshot_files,
+    read_snapshot_file,
 )
+
+
+def _get_snapshot_id(path: Path) -> str:
+    """Extract the snapshot ID (composer ID) from a snapshot filename."""
+    name = path.name
+    if name.endswith(".json.gz"):
+        return name[:-8]
+    elif name.endswith(".json"):
+        return name[:-5]
+    return path.stem
 from .reload import print_reload_hint
 from .watch import watch_loop
 
@@ -776,8 +788,8 @@ def cmd_status(args):
     # Get snapshot conversations
     snapshot_ids = set()
     if snapshots_dir.exists():
-        for f in snapshots_dir.glob("*.json"):
-            snapshot_ids.add(f.stem)
+        for f in list_snapshot_files(snapshots_dir):
+            snapshot_ids.add(_get_snapshot_id(f))
 
     only_local = local_ids - snapshot_ids
     only_snapshot = snapshot_ids - local_ids
@@ -914,7 +926,7 @@ def cmd_delete(args):
         print(f"No snapshots found for {project_path}")
         return
 
-    snapshot_files = sorted(snapshots_dir.glob("*.json"))
+    snapshot_files = list_snapshot_files(snapshots_dir)
     if not snapshot_files:
         print(f"No snapshots found for {project_path}")
         return
@@ -947,25 +959,25 @@ def cmd_delete(args):
     if args.id:
         # Delete a specific snapshot by ID (supports partial match)
         target = args.id
-        matches = [f for f in snapshot_files if f.stem.startswith(target)]
+        matches = [f for f in snapshot_files if _get_snapshot_id(f).startswith(target)]
         if not matches:
             print(f"No snapshot matching '{target}' found.", file=sys.stderr)
             sys.exit(1)
         if len(matches) > 1:
             print(f"Multiple snapshots match '{target}':", file=sys.stderr)
             for f in matches:
-                print(f"  {f.stem}", file=sys.stderr)
+                print(f"  {_get_snapshot_id(f)}", file=sys.stderr)
             print("Be more specific.", file=sys.stderr)
             sys.exit(1)
 
         match = matches[0]
         match.unlink()
-        print(f"Deleted {match.stem}")
+        print(f"Deleted {_get_snapshot_id(match)}")
 
         # Sync deletion to remote
         if sync_dir.exists() and _git_has_remote(sync_dir):
             hostname = paths.get_machine_id()
-            if _git_commit_and_push(sync_dir, f"[{hostname}] delete {match.stem[:12]}"):
+            if _git_commit_and_push(sync_dir, f"[{hostname}] delete {_get_snapshot_id(match)[:12]}"):
                 print("Synced to remote.")
         return
 
@@ -974,11 +986,11 @@ def cmd_delete(args):
     snapshot_info = []
     for i, f in enumerate(snapshot_files, 1):
         try:
-            data = json.loads(f.read_text())
+            data = read_snapshot_file(f)
             name = data.get("composerData", {}).get("name", "Untitled")
             exported_at = data.get("exportedAt", "unknown")
             source = data.get("sourceMachine", "unknown")
-        except (json.JSONDecodeError, OSError):
+        except Exception:
             name = "Untitled"
             exported_at = "unknown"
             source = "unknown"

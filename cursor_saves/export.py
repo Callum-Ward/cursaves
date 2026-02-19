@@ -1,5 +1,6 @@
 """Export and list operations -- read-only, safe to run while Cursor is open."""
 
+import gzip
 import json
 import os
 import sys
@@ -223,7 +224,7 @@ def export_conversation(project_path: str, composer_id: str) -> Optional[dict]:
 
 
 def save_snapshot(snapshot: dict, snapshots_dir: Path) -> Path:
-    """Save a snapshot dict to a JSON file.
+    """Save a snapshot dict to a compressed JSON file.
 
     Returns the path to the saved file.
     """
@@ -236,8 +237,17 @@ def save_snapshot(snapshot: dict, snapshots_dir: Path) -> Path:
     project_dir.mkdir(parents=True, exist_ok=True)
 
     composer_id = snapshot["composerId"]
-    snapshot_file = project_dir / f"{composer_id}.json"
-    snapshot_file.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False))
+    
+    # Remove old uncompressed file if it exists
+    old_file = project_dir / f"{composer_id}.json"
+    if old_file.exists():
+        old_file.unlink()
+    
+    # Save as gzip-compressed JSON
+    snapshot_file = project_dir / f"{composer_id}.json.gz"
+    json_bytes = json.dumps(snapshot, ensure_ascii=False).encode("utf-8")
+    with gzip.open(snapshot_file, "wb", compresslevel=9) as f:
+        f.write(json_bytes)
     return snapshot_file
 
 

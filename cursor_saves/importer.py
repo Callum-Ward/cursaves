@@ -1,5 +1,6 @@
 """Import operations -- writes to Cursor's databases with safety checks."""
 
+import gzip
 import json
 import os
 import re
@@ -10,6 +11,21 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import db, paths
+
+
+def read_snapshot_file(path: Path) -> dict:
+    """Read a snapshot file (supports both .json and .json.gz)."""
+    if path.suffix == ".gz":
+        with gzip.open(path, "rt", encoding="utf-8") as f:
+            return json.load(f)
+    else:
+        return json.loads(path.read_text())
+
+
+def list_snapshot_files(directory: Path) -> list[Path]:
+    """List all snapshot files in a directory (both .json and .json.gz)."""
+    files = list(directory.glob("*.json")) + list(directory.glob("*.json.gz"))
+    return sorted(files)
 
 
 def is_cursor_running() -> bool:
@@ -104,8 +120,8 @@ def import_snapshot(
     """
     # Load snapshot
     try:
-        snapshot = json.loads(snapshot_path.read_text())
-    except (json.JSONDecodeError, OSError) as e:
+        snapshot = read_snapshot_file(snapshot_path)
+    except (json.JSONDecodeError, OSError, gzip.BadGzipFile) as e:
         print(f"Error reading snapshot: {e}", file=sys.stderr)
         return False
 
@@ -219,7 +235,7 @@ def list_snapshot_projects(snapshots_dir: Optional[Path] = None) -> list[dict]:
     for project_dir in sorted(snapshots_dir.iterdir()):
         if not project_dir.is_dir():
             continue
-        snapshot_files = list(project_dir.glob("*.json"))
+        snapshot_files = list_snapshot_files(project_dir)
         if not snapshot_files:
             continue
 
@@ -227,14 +243,14 @@ def list_snapshot_projects(snapshots_dir: Optional[Path] = None) -> list[dict]:
         source_machines = set()
         for sf in snapshot_files:
             try:
-                data = json.loads(sf.read_text())
+                data = read_snapshot_file(sf)
                 sp = data.get("sourceProjectPath", "")
                 if sp:
                     source_paths.add(sp)
                 sm = data.get("sourceMachine", "")
                 if sm:
                     source_machines.add(sm)
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError, gzip.BadGzipFile):
                 pass
 
         projects.append({
@@ -267,13 +283,13 @@ def find_snapshot_dir_for_project(
     # 1. Exact match by project identifier
     project_id = paths.get_project_identifier(target_project_path)
     exact = snapshots_dir / project_id
-    if exact.exists() and list(exact.glob("*.json")):
+    if exact.exists() and list_snapshot_files(exact):
         return exact
 
     # 2. Basename match (covers SSH workspace push → local pull)
     basename = os.path.basename(os.path.normpath(target_project_path))
     basename_dir = snapshots_dir / basename
-    if basename_dir.exists() and basename_dir != exact and list(basename_dir.glob("*.json")):
+    if basename_dir.exists() and basename_dir != exact and list_snapshot_files(basename_dir):
         return basename_dir
 
     # 3. Scan snapshot dirs for matching source path basenames
@@ -283,13 +299,13 @@ def find_snapshot_dir_for_project(
         if not project_dir.is_dir() or project_dir == exact or project_dir == basename_dir:
             continue
         # Check first snapshot file for a matching source path basename
-        for sf in project_dir.glob("*.json"):
+        for sf in list_snapshot_files(project_dir):
             try:
-                data = json.loads(sf.read_text())
+                data = read_snapshot_file(sf)
                 source_path = data.get("sourceProjectPath", "")
                 if source_path and os.path.basename(os.path.normpath(source_path)) == basename:
                     return project_dir
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError, gzip.BadGzipFile):
                 pass
             break  # Only need to check one file per directory
 
@@ -313,7 +329,7 @@ def import_from_snapshot_dir(
             file=sys.stderr,
         )
 
-    snapshot_files = sorted(snapshot_dir.glob("*.json"))
+    snapshot_files = list_snapshot_files(snapshot_dir)
     if not snapshot_files:
         return 0, 0
 
