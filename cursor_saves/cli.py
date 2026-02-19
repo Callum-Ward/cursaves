@@ -8,7 +8,13 @@ import sys
 from pathlib import Path
 
 from . import __version__, export, paths
-from .importer import import_all_snapshots, import_snapshot
+from .importer import (
+    find_snapshot_dir_for_project,
+    import_all_snapshots,
+    import_from_snapshot_dir,
+    import_snapshot,
+    list_snapshot_projects,
+)
 from .reload import print_reload_hint, reload_cursor_window
 from .watch import watch_loop
 
@@ -56,6 +62,37 @@ def cmd_workspaces(args):
 
     print(f"\n{len(workspaces)} workspace(s) with conversations")
     print("\nUse 'cursaves push -w <number>' to push a specific workspace.")
+
+
+def cmd_snapshots(args):
+    """List all snapshot projects available in ~/.cursaves/snapshots/."""
+    snapshots_dir = paths.get_snapshots_dir()
+    projects = list_snapshot_projects(snapshots_dir)
+
+    if not projects:
+        print("No snapshots found in ~/.cursaves/snapshots/")
+        print("Run 'cursaves push' to checkpoint and push conversations.")
+        return
+
+    print(f"{'#':<4} {'Project':<40} {'Chats':>5}  {'Source Machine':<20} {'Source Path'}")
+    print("-" * 110)
+
+    for i, p in enumerate(projects, 1):
+        sources = ", ".join(sorted(p["sources"])) or "unknown"
+        # Show the most representative source path
+        source_path = ""
+        if p["source_paths"]:
+            source_path = sorted(p["source_paths"])[0]
+            if len(source_path) > 40:
+                source_path = "..." + source_path[-37:]
+
+        name = p["name"]
+        if len(name) > 38:
+            name = name[:35] + "..."
+        print(f"{i:<4} {name:<40} {p['count']:>5}  {sources:<20} {source_path}")
+
+    print(f"\n{len(projects)} project(s) with snapshots")
+    print(f"\nUse 'cursaves pull -s' to interactively select which to import.")
 
 
 def cmd_init(args):
@@ -478,61 +515,148 @@ def cmd_push(args):
     print(f"\nDone. {len(saved)} conversation(s) saved and pushed.")
 
 
-def cmd_pull(args):
-    """Git pull + import snapshots in one command."""
+def _git_pull(sync_dir: Path) -> bool:
+    """Fetch and rebase from remote. Returns True on success."""
     from .watch import _git_has_remote
 
+    if not _git_has_remote(sync_dir):
+        print("No git remote configured, importing from local snapshots only.")
+        return True
+
+    print("Pulling latest snapshots...", end="", flush=True)
+    subprocess.run(
+        ["git", "fetch", "origin"],
+        cwd=str(sync_dir),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    subprocess.run(
+        ["git", "branch", "--set-upstream-to=origin/main", "main"],
+        cwd=str(sync_dir),
+        capture_output=True,
+    )
+    pull_result = subprocess.run(
+        ["git", "rebase", "--autostash", "origin/main"],
+        cwd=str(sync_dir),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if pull_result.returncode == 0:
+        print(" done")
+        return True
+    else:
+        print(f" failed: {pull_result.stderr.strip()}", file=sys.stderr)
+        return False
+
+
+def cmd_pull(args):
+    """Git pull + import snapshots in one command."""
     sync_dir = _require_sync_repo()
-    project_path = _resolve_project(args)
 
     # Step 1: Git pull
-    if _git_has_remote(sync_dir):
-        print("Pulling latest snapshots...", end="", flush=True)
-        # Fetch first, then try to rebase onto the remote branch.
-        # We use explicit "origin main" to avoid failures when the
-        # local branch has no upstream tracking configured yet.
-        subprocess.run(
-            ["git", "fetch", "origin"],
-            cwd=str(sync_dir),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        # Set up tracking so future pulls work without specifying branch
-        subprocess.run(
-            ["git", "branch", "--set-upstream-to=origin/main", "main"],
-            cwd=str(sync_dir),
-            capture_output=True,
-        )
-        pull_result = subprocess.run(
-            ["git", "rebase", "--autostash", "origin/main"],
-            cwd=str(sync_dir),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if pull_result.returncode == 0:
-            print(" done")
-        else:
-            print(f" failed: {pull_result.stderr.strip()}", file=sys.stderr)
-            return
-    else:
-        print("No git remote configured, importing from local snapshots only.")
-
-    # Step 2: Import
-    print(f"Importing snapshots for {project_path}...")
-    success, failure = import_all_snapshots(
-        project_path,
-        force=args.force,
-    )
-
-    if success == 0 and failure == 0:
-        print("No snapshots found to import.")
+    if not _git_pull(sync_dir):
         return
 
-    print(f"\nDone: {success} imported, {failure} failed.")
-    if success > 0:
-        _maybe_reload(args)
+    # Step 2: Select what to import
+    if args.select:
+        # Interactive: show available snapshot projects and let user pick
+        projects = list_snapshot_projects()
+        if not projects:
+            print("No snapshots found. Run 'cursaves push' on another machine first.")
+            return
+
+        print(f"\nAvailable snapshot projects:\n")
+        print(f"  {'#':<4} {'Project':<40} {'Chats':>5}  {'Source'}")
+        print(f"  {'-' * 75}")
+
+        for i, p in enumerate(projects, 1):
+            sources = ", ".join(sorted(p["sources"])) or "unknown"
+            name = p["name"]
+            if len(name) > 38:
+                name = name[:35] + "..."
+            print(f"  {i:<4} {name:<40} {p['count']:>5}  {sources}")
+
+        print(f"\nSelect project(s) to import (e.g. 1,3 or 1-3 or 'all'):")
+        try:
+            choice = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+
+        if not choice:
+            return
+
+        indices = _parse_selection(choice, len(projects))
+        if not indices:
+            return
+
+        # For each selected project, ask for target project path
+        total_success = 0
+        total_failure = 0
+        for idx in indices:
+            project = projects[idx - 1]
+            print(f"\nImporting from {project['name']}/ ({project['count']} snapshot(s))...")
+
+            # Use the source path from the snapshots as the target,
+            # or ask the user if it doesn't exist locally
+            target_path = None
+            for sp in sorted(project["source_paths"]):
+                if os.path.isdir(sp):
+                    target_path = sp
+                    break
+
+            if not target_path:
+                # Try CWD as fallback
+                cwd = os.getcwd()
+                cwd_basename = os.path.basename(os.path.normpath(cwd))
+                source_basenames = {os.path.basename(os.path.normpath(sp)) for sp in project["source_paths"]}
+                if cwd_basename in source_basenames or project["name"] == paths.get_project_identifier(cwd):
+                    target_path = cwd
+                else:
+                    print(f"  Source path(s): {', '.join(sorted(project['source_paths']))}")
+                    print(f"  No matching local directory found.")
+                    print(f"  Enter the local project path to import into:")
+                    try:
+                        target_path = input("  > ").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        print()
+                        continue
+                    if not target_path:
+                        print("  Skipped.")
+                        continue
+
+            print(f"  Target: {target_path}")
+            success, failure = import_from_snapshot_dir(
+                project["path"], target_path, force=args.force,
+            )
+            total_success += success
+            total_failure += failure
+
+        if total_success == 0 and total_failure == 0:
+            print("\nNo snapshots imported.")
+            return
+
+        print(f"\nDone: {total_success} imported, {total_failure} failed.")
+        if total_success > 0:
+            _maybe_reload(args)
+    else:
+        # Non-interactive: import for the resolved project
+        project_path = _resolve_project(args)
+        print(f"Importing snapshots for {project_path}...")
+        success, failure = import_all_snapshots(
+            project_path,
+            force=args.force,
+        )
+
+        if success == 0 and failure == 0:
+            print("No snapshots found to import.")
+            return
+
+        print(f"\nDone: {success} imported, {failure} failed.")
+        if success > 0:
+            _maybe_reload(args)
 
 
 def cmd_watch(args):
@@ -715,6 +839,12 @@ def main():
     )
     p_workspaces.set_defaults(func=cmd_workspaces)
 
+    # ── snapshots ──────────────────────────────────────────────────
+    p_snapshots = subparsers.add_parser(
+        "snapshots", help="List snapshot projects available in ~/.cursaves/"
+    )
+    p_snapshots.set_defaults(func=cmd_snapshots)
+
     # ── list ────────────────────────────────────────────────────────
     p_list = subparsers.add_parser("list", help="List conversations for a project")
     add_project_args(p_list)
@@ -765,6 +895,10 @@ def main():
         "pull", help="Git pull + import snapshots (one command to sync and restore)"
     )
     add_project_args(p_pull)
+    p_pull.add_argument(
+        "--select", "-s", action="store_true",
+        help="Interactively select which snapshot projects to import",
+    )
     p_pull.add_argument(
         "--force", action="store_true",
         help="Suppress the Cursor-running warning",
@@ -826,8 +960,10 @@ def main():
             "  push          Checkpoint + commit + push to remote\n"
             "  push -s       Interactively select conversations to push\n"
             "  pull          Pull from remote + import into Cursor\n"
+            "  pull -s       Interactively select which projects to import\n"
             "  init          Initialize ~/.cursaves/ sync repo\n"
             "  workspaces    List all Cursor workspaces (local + SSH)\n"
+            "  snapshots     List snapshot projects available after pull\n"
             "  list          List conversations for a project\n"
             "  status        Show sync status (local vs snapshots)\n"
             "  reload        Trigger Cursor to reload and pick up changes\n"
