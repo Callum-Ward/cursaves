@@ -199,8 +199,8 @@ def list_conversations(project_path: str) -> list[dict]:
     return results
 
 
-MAX_SNAPSHOT_SIZE_MB = 50  # Target max size before compression
-MAX_RECENT_CONTEXTS = 20   # Always keep this many recent message contexts
+MAX_COMPRESSED_SIZE_MB = 95  # Stay under GitHub's 100MB limit
+MAX_RECENT_CONTEXTS = 20     # Always keep this many recent message contexts
 
 
 def _trim_message_contexts(contexts: dict[str, Any], max_size_bytes: int) -> dict[str, Any]:
@@ -245,8 +245,8 @@ def _trim_message_contexts(contexts: dict[str, Any], max_size_bytes: int) -> dic
 def export_conversation(project_path: str, composer_id: str) -> Optional[dict]:
     """Export a single conversation to a self-contained snapshot dict.
     
-    Includes messageContexts (file contents, git diffs) for seamless continuation,
-    but trims older contexts if the snapshot would exceed the size limit.
+    Includes messageContexts (file contents, git diffs) for seamless continuation.
+    Size trimming happens in save_snapshot after checking compressed size.
     """
     conv_data = get_conversation_data(composer_id)
     if not conv_data:
@@ -266,22 +266,27 @@ def export_conversation(project_path: str, composer_id: str) -> Optional[dict]:
         "contentBlobs": get_content_blobs(composer_id),
         "bubbleEntries": bubbles,
         "transcript": get_transcript(project_path, composer_id),
+        "messageContexts": get_message_contexts(composer_id),
     }
-    
-    # Include messageContexts with smart trimming
-    contexts = get_message_contexts(composer_id)
-    if contexts:
-        # Calculate base snapshot size (without contexts)
-        base_size = len(json.dumps(snapshot))
-        # Allow contexts to use remaining space up to limit
-        max_context_size = (MAX_SNAPSHOT_SIZE_MB * 1024 * 1024) - base_size
-        snapshot["messageContexts"] = _trim_message_contexts(contexts, max_context_size)
     
     return snapshot
 
 
+def _compress_snapshot(snapshot: dict) -> bytes:
+    """Compress a snapshot dict to gzip bytes."""
+    json_bytes = json.dumps(snapshot, ensure_ascii=False).encode("utf-8")
+    import io
+    buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=9) as f:
+        f.write(json_bytes)
+    return buf.getvalue()
+
+
 def save_snapshot(snapshot: dict, snapshots_dir: Path) -> Path:
     """Save a snapshot dict to a compressed JSON file.
+    
+    If compressed size exceeds the limit, trims older messageContexts
+    while keeping recent ones for seamless continuation.
 
     Returns the path to the saved file.
     """
@@ -300,11 +305,35 @@ def save_snapshot(snapshot: dict, snapshots_dir: Path) -> Path:
     if old_file.exists():
         old_file.unlink()
     
-    # Save as gzip-compressed JSON
+    # Compress and check size
+    max_size = MAX_COMPRESSED_SIZE_MB * 1024 * 1024
+    compressed = _compress_snapshot(snapshot)
+    
+    # If too large, trim messageContexts and retry
+    if len(compressed) > max_size and snapshot.get("messageContexts"):
+        contexts = snapshot["messageContexts"]
+        # Binary search for acceptable context size
+        # Start by keeping only recent contexts
+        trimmed_contexts = _trim_message_contexts(contexts, max_size * 5)  # Rough estimate
+        snapshot["messageContexts"] = trimmed_contexts
+        compressed = _compress_snapshot(snapshot)
+        
+        # If still too large, keep removing contexts
+        while len(compressed) > max_size and len(snapshot.get("messageContexts", {})) > MAX_RECENT_CONTEXTS:
+            # Remove half of the remaining non-recent contexts
+            sorted_keys = sorted(snapshot["messageContexts"].keys())
+            keep_keys = sorted_keys[len(sorted_keys)//2:]  # Keep newer half
+            snapshot["messageContexts"] = {k: snapshot["messageContexts"][k] for k in keep_keys}
+            compressed = _compress_snapshot(snapshot)
+        
+        # If still too large even with only recent contexts, remove contexts entirely
+        if len(compressed) > max_size:
+            snapshot["messageContexts"] = {}
+            compressed = _compress_snapshot(snapshot)
+    
+    # Save
     snapshot_file = project_dir / f"{composer_id}.json.gz"
-    json_bytes = json.dumps(snapshot, ensure_ascii=False).encode("utf-8")
-    with gzip.open(snapshot_file, "wb", compresslevel=9) as f:
-        f.write(json_bytes)
+    snapshot_file.write_bytes(compressed)
     return snapshot_file
 
 
