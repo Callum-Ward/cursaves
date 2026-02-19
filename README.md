@@ -2,7 +2,16 @@
 
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-yellow?style=flat&logo=buy-me-a-coffee)](https://buymeacoffee.com/callumward)
 
-Cursor stores chat history locally. Switch machines and it's gone. This tool checkpoints conversations to a git repo so you can restore them anywhere.
+Cursor stores chats locally. Switch machines and they're gone. This tool saves your chats to a git repo so you can restore them anywhere.
+
+## Terminology
+
+| Term | Meaning |
+|------|---------|
+| **Chat** | A conversation with the AI in Cursor (also called "composer" internally) |
+| **Project** | Your code directory (e.g., `/home/user/repos/myapp`) |
+| **Workspace** | Cursor's internal reference to a project - shown by `cursaves workspaces` |
+| **Snapshot** | An exported chat saved to `~/.cursaves/snapshots/` |
 
 ## Quick Start
 

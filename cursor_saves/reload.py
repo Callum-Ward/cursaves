@@ -126,4 +126,4 @@ def _reload_linux() -> bool:
 
 def print_reload_hint():
     """Print instructions for restarting Cursor to pick up changes."""
-    print("Restart Cursor (quit and reopen) to see imported conversations.")
+    print("Restart Cursor (quit and reopen) to see imported chats.")

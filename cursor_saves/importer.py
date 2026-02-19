@@ -307,8 +307,8 @@ def import_from_snapshot_dir(
     """
     if not force and is_cursor_running():
         print(
-            "Warning: Cursor is running. Imports will write to Cursor's database,\n"
-            "but Cursor won't see the changes until you restart it (quit and reopen).\n"
+            "Warning: Cursor is running. Imports will write to the database,\n"
+            "but you'll need to restart Cursor (quit and reopen) to see the chats.\n"
             "Use --force to suppress this warning.\n",
             file=sys.stderr,
         )
@@ -344,8 +344,8 @@ def import_all_snapshots(
     # Warn once if Cursor is running (but proceed anyway)
     if not force and is_cursor_running():
         print(
-            "Warning: Cursor is running. Imports will write to Cursor's database,\n"
-            "but Cursor won't see the changes until you restart it (quit and reopen).\n"
+            "Warning: Cursor is running. Imports will write to the database,\n"
+            "but you'll need to restart Cursor (quit and reopen) to see the chats.\n"
             "Use --force to suppress this warning.\n",
             file=sys.stderr,
         )
