@@ -24,6 +24,16 @@ def _ensure_repo_healthy(sync_dir: Path) -> None:
     if not sync_dir.exists():
         return
 
+    # Check if a rebase is in progress and abort it
+    rebase_dir = sync_dir / ".git" / "rebase-merge"
+    rebase_apply_dir = sync_dir / ".git" / "rebase-apply"
+    if rebase_dir.exists() or rebase_apply_dir.exists():
+        subprocess.run(
+            ["git", "rebase", "--abort"],
+            cwd=str(sync_dir),
+            capture_output=True,
+        )
+
     # Check if we're on main branch
     result = subprocess.run(
         ["git", "symbolic-ref", "--short", "HEAD"],
