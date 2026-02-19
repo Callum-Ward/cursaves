@@ -199,17 +199,54 @@ def list_conversations(project_path: str) -> list[dict]:
     return results
 
 
-def export_conversation(
-    project_path: str, composer_id: str, include_context: bool = False
-) -> Optional[dict]:
+MAX_SNAPSHOT_SIZE_MB = 50  # Target max size before compression
+MAX_RECENT_CONTEXTS = 20   # Always keep this many recent message contexts
+
+
+def _trim_message_contexts(contexts: dict[str, Any], max_size_bytes: int) -> dict[str, Any]:
+    """Trim older message contexts to stay under size limit.
+    
+    Keeps the most recent contexts (by key, which includes message ID).
+    """
+    if not contexts:
+        return contexts
+    
+    # Sort by key (message IDs are typically chronological or we keep all if small)
+    sorted_keys = sorted(contexts.keys())
+    
+    # Always keep the last N contexts
+    recent_keys = set(sorted_keys[-MAX_RECENT_CONTEXTS:])
+    
+    # Calculate current size
+    current_size = sum(len(json.dumps(v)) for v in contexts.values())
+    
+    if current_size <= max_size_bytes:
+        return contexts
+    
+    # Remove oldest contexts until we're under the limit
+    trimmed = {}
+    kept_size = 0
+    
+    # First, always include recent contexts
+    for key in sorted_keys[-MAX_RECENT_CONTEXTS:]:
+        trimmed[key] = contexts[key]
+        kept_size += len(json.dumps(contexts[key]))
+    
+    # Then add older ones if there's room
+    for key in sorted_keys[:-MAX_RECENT_CONTEXTS]:
+        entry_size = len(json.dumps(contexts[key]))
+        if kept_size + entry_size <= max_size_bytes:
+            trimmed[key] = contexts[key]
+            kept_size += entry_size
+    
+    return trimmed
+
+
+def export_conversation(project_path: str, composer_id: str) -> Optional[dict]:
     """Export a single conversation to a self-contained snapshot dict.
     
-    Args:
-        project_path: The project path.
-        composer_id: The conversation ID.
-        include_context: If True, include messageContexts (full file contents 
-            that were in context). This can make snapshots very large (100MB+)
-            but is not needed to restore the conversation.
+    Includes messageContexts (file contents, git diffs) for seamless continuation,
+    but trims older contexts if the snapshot would exceed the size limit.
     """
     conv_data = get_conversation_data(composer_id)
     if not conv_data:
@@ -219,7 +256,7 @@ def export_conversation(
     bubbles = get_bubble_entries(composer_id)
 
     snapshot = {
-        "version": 3,  # Bumped for bubbleEntries support
+        "version": 3,
         "exportedAt": datetime.now(timezone.utc).isoformat(),
         "sourceMachine": paths.get_machine_id(),
         "sourceProjectPath": os.path.normpath(project_path),
@@ -227,13 +264,18 @@ def export_conversation(
         "composerId": composer_id,
         "composerData": conv_data,
         "contentBlobs": get_content_blobs(composer_id),
-        "bubbleEntries": bubbles,  # Individual message content
+        "bubbleEntries": bubbles,
         "transcript": get_transcript(project_path, composer_id),
     }
     
-    # messageContexts contains full file contents - skip by default to keep size down
-    if include_context:
-        snapshot["messageContexts"] = get_message_contexts(composer_id)
+    # Include messageContexts with smart trimming
+    contexts = get_message_contexts(composer_id)
+    if contexts:
+        # Calculate base snapshot size (without contexts)
+        base_size = len(json.dumps(snapshot))
+        # Allow contexts to use remaining space up to limit
+        max_context_size = (MAX_SNAPSHOT_SIZE_MB * 1024 * 1024) - base_size
+        snapshot["messageContexts"] = _trim_message_contexts(contexts, max_context_size)
     
     return snapshot
 
