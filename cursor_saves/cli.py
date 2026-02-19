@@ -26,15 +26,19 @@ def _git_reset_to_origin(sync_dir: Path) -> bool:
     if not sync_dir.exists():
         return False
 
-    # Abort any in-progress rebase
+    # Abort any in-progress rebase/merge/cherry-pick
     rebase_dir = sync_dir / ".git" / "rebase-merge"
     rebase_apply_dir = sync_dir / ".git" / "rebase-apply"
     if rebase_dir.exists() or rebase_apply_dir.exists():
         subprocess.run(["git", "rebase", "--abort"], cwd=str(sync_dir), capture_output=True)
+    
+    # Also try to abort merge if in progress
+    subprocess.run(["git", "merge", "--abort"], cwd=str(sync_dir), capture_output=True)
+    subprocess.run(["git", "cherry-pick", "--abort"], cwd=str(sync_dir), capture_output=True)
 
     if not _git_has_remote(sync_dir):
         # No remote, just ensure we're on main
-        subprocess.run(["git", "checkout", "-B", "main"], cwd=str(sync_dir), capture_output=True)
+        subprocess.run(["git", "checkout", "-f", "-B", "main"], cwd=str(sync_dir), capture_output=True)
         return True
 
     try:
@@ -49,9 +53,9 @@ def _git_reset_to_origin(sync_dir: Path) -> bool:
         if fetch_result.returncode != 0:
             return False
 
-        # Reset hard to origin/main (remote is ground truth)
+        # Force checkout to main and reset hard (discard all local state)
         subprocess.run(
-            ["git", "checkout", "-B", "main"],
+            ["git", "checkout", "-f", "-B", "main", "origin/main"],
             cwd=str(sync_dir),
             capture_output=True,
         )
@@ -62,6 +66,12 @@ def _git_reset_to_origin(sync_dir: Path) -> bool:
         )
         subprocess.run(
             ["git", "branch", "--set-upstream-to=origin/main", "main"],
+            cwd=str(sync_dir),
+            capture_output=True,
+        )
+        # Clean up any untracked files
+        subprocess.run(
+            ["git", "clean", "-fd"],
             cwd=str(sync_dir),
             capture_output=True,
         )
