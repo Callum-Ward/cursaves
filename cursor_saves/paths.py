@@ -365,6 +365,61 @@ def get_machine_id() -> str:
     return socket.gethostname()
 
 
+# ── Workspace matching for imports ─────────────────────────────────────
+
+
+def find_all_matching_workspaces(source_path: str) -> list[dict]:
+    """Find all workspaces that could receive imports from source_path.
+
+    Matches by:
+    1. Exact path match (for SSH workspaces with same remote path)
+    2. Same basename (fallback for different directory structures)
+
+    Returns list of workspace dicts with type, host, path, workspace_dir,
+    sorted by match quality (exact matches first) then by mtime.
+    """
+    all_ws = list_all_workspaces()
+    source_normalized = os.path.normpath(source_path)
+    source_basename = os.path.basename(source_normalized)
+
+    exact_matches = []
+    basename_matches = []
+
+    for ws in all_ws:
+        ws_path = ws["path"]
+        ws_basename = os.path.basename(ws_path)
+
+        if ws_path == source_normalized:
+            exact_matches.append(ws)
+        elif ws_basename == source_basename:
+            basename_matches.append(ws)
+
+    # Return exact matches first, then basename matches
+    return exact_matches + basename_matches
+
+
+def format_workspace_display(ws: dict, include_path: bool = True) -> str:
+    """Format a workspace dict for display.
+
+    Returns a string like "ssh core /mnt/home/.../project" or "(local) /home/.../project"
+    """
+    if ws["type"] == "ssh":
+        host = ws.get("host") or "unknown"
+        if include_path:
+            path = ws["path"]
+            if len(path) > 40:
+                path = "..." + path[-37:]
+            return f"ssh {host} {path}"
+        return f"ssh {host}"
+    else:
+        if include_path:
+            path = ws["path"]
+            if len(path) > 45:
+                path = "..." + path[-42:]
+            return f"(local) {path}"
+        return "(local)"
+
+
 # ── Project identification ────────────────────────────────────────────
 
 

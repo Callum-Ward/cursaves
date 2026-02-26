@@ -109,12 +109,15 @@ def _init_workspace_db(db_path: Path):
 def import_snapshot(
     snapshot_path: Path,
     target_project_path: str,
+    target_workspace_dir: Optional[Path] = None,
 ) -> bool:
     """Import a conversation snapshot into Cursor's databases.
 
     Args:
         snapshot_path: Path to the .json snapshot file.
         target_project_path: The project path on this machine.
+        target_workspace_dir: Optional workspace directory to import into.
+            If not provided, uses find_or_create_workspace() to find/create one.
 
     Returns True on success, False on failure.
     """
@@ -175,7 +178,10 @@ def import_snapshot(
         global_cdb.close()
 
     # ── Step 3: Register conversation in workspace DB ───────────────
-    ws_dir = find_or_create_workspace(target_path)
+    if target_workspace_dir is not None:
+        ws_dir = target_workspace_dir
+    else:
+        ws_dir = find_or_create_workspace(target_path)
     ws_db_path = ws_dir / "state.vscdb"
 
     if ws_db_path.exists():
@@ -321,8 +327,15 @@ def import_from_snapshot_dir(
     snapshot_dir: Path,
     target_project_path: str,
     force: bool = False,
+    target_workspace_dir: Optional[Path] = None,
 ) -> tuple[int, int]:
     """Import all snapshots from a specific snapshot directory.
+
+    Args:
+        snapshot_dir: Directory containing snapshot files.
+        target_project_path: The project path on this machine.
+        force: Suppress Cursor-running warning.
+        target_workspace_dir: Optional workspace directory to import into.
 
     Returns (success_count, failure_count).
     """
@@ -343,7 +356,7 @@ def import_from_snapshot_dir(
 
     for sf in snapshot_files:
         print(f"Importing {sf.name}...")
-        if import_snapshot(sf, target_project_path):
+        if import_snapshot(sf, target_project_path, target_workspace_dir):
             success += 1
             print(f"  OK")
         else:
@@ -357,8 +370,15 @@ def import_all_snapshots(
     target_project_path: str,
     snapshots_dir: Optional[Path] = None,
     force: bool = False,
+    target_workspace_dir: Optional[Path] = None,
 ) -> tuple[int, int]:
     """Import all snapshots for a project.
+
+    Args:
+        target_project_path: The project path on this machine.
+        snapshots_dir: Directory containing snapshot subdirectories.
+        force: Suppress Cursor-running warning.
+        target_workspace_dir: Optional workspace directory to import into.
 
     Returns (success_count, failure_count).
     """
@@ -390,4 +410,7 @@ def import_all_snapshots(
             file=sys.stderr,
         )
 
-    return import_from_snapshot_dir(project_snapshots, target_project_path, force=force)
+    return import_from_snapshot_dir(
+        project_snapshots, target_project_path, force=force,
+        target_workspace_dir=target_workspace_dir,
+    )

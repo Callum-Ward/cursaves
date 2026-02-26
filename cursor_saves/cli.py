@@ -114,6 +114,30 @@ def _resolve_project(args) -> str:
     return args.project if (hasattr(args, "project") and args.project) else paths.get_project_path()
 
 
+def _resolve_workspace_for_import(args) -> tuple[str, "Path | None"]:
+    """Resolve the project path and optional workspace directory for import.
+
+    When -w is specified, returns (project_path, workspace_dir) so imports go
+    directly into that specific workspace. Otherwise returns (project_path, None)
+    and the importer will find/create a workspace automatically.
+    """
+    from pathlib import Path
+
+    if hasattr(args, "workspace") and args.workspace:
+        ws = paths.resolve_workspace(args.workspace)
+        if ws is None:
+            print(
+                f"Error: No workspace matching '{args.workspace}'.\n"
+                f"Run 'cursaves workspaces' to see available workspaces.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        return ws["path"], ws["workspace_dir"]
+
+    project_path = args.project if (hasattr(args, "project") and args.project) else paths.get_project_path()
+    return project_path, None
+
+
 def cmd_workspaces(args):
     """List Cursor workspaces that have conversations."""
     from datetime import datetime, timezone
@@ -194,6 +218,24 @@ def cmd_snapshots(args):
         if len(name) > 33:
             name = name[:30] + "..."
         print(f"{i:<4} {name:<35} {p['count']:>5}  {ws_type:<6} {sources:<18} {source_path}")
+
+        # Show matching workspaces for this project
+        matching_ws = []
+        for sp in p["source_paths"]:
+            for ws in paths.find_all_matching_workspaces(sp):
+                ws_id = str(ws["workspace_dir"])
+                if ws_id not in [str(m["workspace_dir"]) for m in matching_ws]:
+                    matching_ws.append(ws)
+
+        if matching_ws:
+            ws_displays = []
+            for ws in matching_ws[:3]:  # Show max 3 matches
+                if ws["type"] == "ssh":
+                    ws_displays.append(f"{ws.get('host', '?')}:{os.path.basename(ws['path'])}")
+                else:
+                    ws_displays.append(f"(local):{os.path.basename(ws['path'])}")
+            extra = f" +{len(matching_ws) - 3} more" if len(matching_ws) > 3 else ""
+            print(f"     -> Matching workspaces: {', '.join(ws_displays)}{extra}")
 
     print(f"\n{len(projects)} project(s) with snapshots")
     print(f"\nUse 'cursaves pull -s' to interactively select which to import.")
@@ -386,6 +428,66 @@ def cmd_import(args):
     else:
         print("Error: Specify --all or --file <path>", file=sys.stderr)
         sys.exit(1)
+
+
+def _select_target_workspaces(source_paths: set[str]) -> list[dict]:
+    """Find and optionally prompt user to select target workspaces for import.
+
+    Args:
+        source_paths: Set of source project paths from snapshots.
+
+    Returns:
+        List of workspace dicts to import into, or empty list if cancelled.
+        Each dict has: type, host, path, workspace_dir
+    """
+    # Find all matching workspaces across all source paths
+    all_matches = []
+    seen_ws_dirs = set()
+    for sp in sorted(source_paths):
+        matches = paths.find_all_matching_workspaces(sp)
+        for ws in matches:
+            ws_dir_str = str(ws["workspace_dir"])
+            if ws_dir_str not in seen_ws_dirs:
+                seen_ws_dirs.add(ws_dir_str)
+                all_matches.append(ws)
+
+    if not all_matches:
+        return []
+
+    if len(all_matches) == 1:
+        # Single match - use it directly
+        ws = all_matches[0]
+        display = paths.format_workspace_display(ws)
+        print(f"  Target workspace: {display}")
+        return [ws]
+
+    # Multiple matches - ask user to select
+    print(f"\n  Multiple workspaces match this project:")
+    print(f"  {'#':<4} {'Type':<6} {'Host':<15} {'Path'}")
+    print(f"  {'-' * 70}")
+
+    for i, ws in enumerate(all_matches, 1):
+        host = ws.get("host") or ""
+        ws_path = ws["path"]
+        if len(ws_path) > 45:
+            ws_path = "..." + ws_path[-42:]
+        print(f"  {i:<4} {ws['type']:<6} {host:<15} {ws_path}")
+
+    print(f"\n  Select workspace(s) to import into (e.g. 1,2 or 'all'):")
+    try:
+        choice = input("  > ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return []
+
+    if not choice:
+        return []
+
+    indices = _parse_selection(choice, len(all_matches))
+    if not indices:
+        return []
+
+    return [all_matches[i - 1] for i in indices]
 
 
 def _maybe_reload(args):
@@ -686,15 +788,49 @@ def cmd_pull(args):
             return
 
         print(f"\nAvailable snapshot projects:\n")
-        print(f"  {'#':<4} {'Project':<40} {'Chats':>5}  {'Source'}")
-        print(f"  {'-' * 75}")
+        print(f"  {'#':<4} {'Project':<30} {'Chats':>5}  {'Type':<6} {'Source':<15} {'Path'}")
+        print(f"  {'-' * 90}")
 
         for i, p in enumerate(projects, 1):
             sources = ", ".join(sorted(p["sources"])) or "unknown"
+            if len(sources) > 13:
+                sources = sources[:12] + "..."
+
+            # Determine type and source path
+            source_path = ""
+            ws_type = "local"
+            if p["source_paths"]:
+                source_path = sorted(p["source_paths"])[0]
+                for sp in p["source_paths"]:
+                    for sm in p["sources"]:
+                        if _is_remote_path(sp, sm):
+                            ws_type = "ssh"
+                            break
+                if len(source_path) > 25:
+                    source_path = "..." + source_path[-22:]
+
             name = p["name"]
-            if len(name) > 38:
-                name = name[:35] + "..."
-            print(f"  {i:<4} {name:<40} {p['count']:>5}  {sources}")
+            if len(name) > 28:
+                name = name[:25] + "..."
+            print(f"  {i:<4} {name:<30} {p['count']:>5}  {ws_type:<6} {sources:<15} {source_path}")
+
+            # Show matching workspaces
+            matching_ws = []
+            for sp in p["source_paths"]:
+                for ws in paths.find_all_matching_workspaces(sp):
+                    ws_id = str(ws["workspace_dir"])
+                    if ws_id not in [str(m["workspace_dir"]) for m in matching_ws]:
+                        matching_ws.append(ws)
+
+            if matching_ws:
+                ws_displays = []
+                for ws in matching_ws[:3]:
+                    if ws["type"] == "ssh":
+                        ws_displays.append(f"{ws.get('host', '?')}:{os.path.basename(ws['path'])}")
+                    else:
+                        ws_displays.append(f"(local):{os.path.basename(ws['path'])}")
+                extra = f" +{len(matching_ws) - 3} more" if len(matching_ws) > 3 else ""
+                print(f"       -> Matches: {', '.join(ws_displays)}{extra}")
 
         print(f"\nSelect project(s) to import (e.g. 1,3 or 1-3 or 'all'):")
         try:
@@ -710,41 +846,34 @@ def cmd_pull(args):
         if not indices:
             return
 
-        # For each selected project, ask for target project path
+        # For each selected project, find/select target workspace(s)
         total_success = 0
         total_failure = 0
         for idx in indices:
             project = projects[idx - 1]
             print(f"\nImporting from {project['name']}/ ({project['count']} snapshot(s))...")
 
-            # Use the source path from the snapshots as the target,
-            # or ask the user if it doesn't exist locally.
-            # For SSH workspaces, the path won't exist locally but we can
-            # still import if there's a matching Cursor workspace.
-            target_path = None
-            for sp in sorted(project["source_paths"]):
-                # Check if path exists locally (for local projects)
-                if os.path.isdir(sp):
-                    target_path = sp
-                    break
-                # Check if there's an existing Cursor workspace for this path
-                # (handles SSH remote workspaces where the path doesn't exist locally)
-                ws_dirs = paths.find_workspace_dirs_for_project(sp)
-                if ws_dirs:
-                    target_path = sp
-                    break
+            # Find matching workspaces and let user select if multiple
+            target_workspaces = _select_target_workspaces(project["source_paths"])
 
-            if not target_path:
-                # Try CWD as fallback
+            if not target_workspaces:
+                # No matching workspaces - fall back to manual path entry
+                # Try CWD as fallback first
                 cwd = os.getcwd()
                 cwd_basename = os.path.basename(os.path.normpath(cwd))
                 source_basenames = {os.path.basename(os.path.normpath(sp)) for sp in project["source_paths"]}
                 if cwd_basename in source_basenames or project["name"] == paths.get_project_identifier(cwd):
-                    target_path = cwd
+                    # CWD matches - import there (will create workspace if needed)
+                    print(f"  Target: {cwd}")
+                    success, failure = import_from_snapshot_dir(
+                        project["path"], cwd, force=args.force,
+                    )
+                    total_success += success
+                    total_failure += failure
                 else:
                     print(f"  Source path(s): {', '.join(sorted(project['source_paths']))}")
-                    print(f"  No matching local or SSH workspace found.")
-                    print(f"  Enter the project path to import into:")
+                    print(f"  No matching workspaces found.")
+                    print(f"  Enter a local project path to import into (or press Enter to skip):")
                     try:
                         target_path = input("  > ").strip()
                     except (EOFError, KeyboardInterrupt):
@@ -754,12 +883,23 @@ def cmd_pull(args):
                         print("  Skipped.")
                         continue
 
-            print(f"  Target: {target_path}")
-            success, failure = import_from_snapshot_dir(
-                project["path"], target_path, force=args.force,
-            )
-            total_success += success
-            total_failure += failure
+                    print(f"  Target: {target_path}")
+                    success, failure = import_from_snapshot_dir(
+                        project["path"], target_path, force=args.force,
+                    )
+                    total_success += success
+                    total_failure += failure
+            else:
+                # Import into each selected workspace
+                for ws in target_workspaces:
+                    display = paths.format_workspace_display(ws)
+                    print(f"  Importing into: {display}")
+                    success, failure = import_from_snapshot_dir(
+                        project["path"], ws["path"], force=args.force,
+                        target_workspace_dir=ws["workspace_dir"],
+                    )
+                    total_success += success
+                    total_failure += failure
 
         if total_success == 0 and total_failure == 0:
             print("\nNo snapshots imported.")
@@ -769,12 +909,23 @@ def cmd_pull(args):
         if total_success > 0:
             _maybe_reload(args)
     else:
-        # Non-interactive: import for the resolved project
-        project_path = _resolve_project(args)
-        print(f"Importing snapshots for {project_path}...")
+        # Non-interactive: import for the resolved project/workspace
+        project_path, workspace_dir = _resolve_workspace_for_import(args)
+        if workspace_dir:
+            # Show which workspace we're importing into
+            ws_info = paths.format_workspace_display(
+                {"type": "ssh" if "ssh" in str(workspace_dir) else "local",
+                 "host": None, "path": project_path},
+                include_path=True
+            )
+            print(f"Importing into workspace: {project_path}")
+        else:
+            print(f"Importing snapshots for {project_path}...")
+
         success, failure = import_all_snapshots(
             project_path,
             force=args.force,
+            target_workspace_dir=workspace_dir,
         )
 
         if success == 0 and failure == 0:
@@ -1142,7 +1293,11 @@ def main():
     p_pull = subparsers.add_parser(
         "pull", help="Git pull + import snapshots (one command to sync and restore)"
     )
-    add_project_args(p_pull)
+    p_pull.add_argument(
+        "--workspace", "-w",
+        help="Target workspace to import into (number from 'cursaves workspaces' or path substring)",
+    )
+    p_pull.add_argument("--project", "-p", help="Project path (default: current directory)")
     p_pull.add_argument(
         "--select", "-s", action="store_true",
         help="Interactively select which snapshot projects to import",
