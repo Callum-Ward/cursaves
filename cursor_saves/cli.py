@@ -11,6 +11,9 @@ from . import __version__, export, paths
 from .importer import (
     copy_between_workspaces,
     find_snapshot_dir_for_project,
+    format_sync_status,
+    get_push_status_for_conversation,
+    get_sync_status_for_snapshot,
     import_all_snapshots,
     import_from_snapshot_dir,
     import_snapshot,
@@ -175,6 +178,55 @@ def _resolve_workspace_for_import(args) -> tuple[str, "Path | None"]:
     return project_path, None
 
 
+def _workspace_sync_summary(ws: dict) -> str:
+    """Compute a short sync summary for a workspace.
+
+    Reads the workspace's conversations and checks each against snapshots.
+    Returns a string like "3 synced, 2 not pushed" or "5 synced".
+    """
+    from . import db as _db
+
+    ws_dir = ws["workspace_dir"]
+    db_path = ws_dir / "state.vscdb"
+    if not db_path.exists():
+        return ""
+
+    try:
+        with _db.CursorDB(db_path) as cdb:
+            data = cdb.get_json("composer.composerData", table="ItemTable")
+    except Exception:
+        return ""
+
+    if not data:
+        return ""
+
+    composers = data.get("allComposers", [])
+    if not composers:
+        return ""
+
+    project_id = paths.get_project_identifier(ws["path"])
+
+    counts = {"up_to_date": 0, "local_ahead": 0, "behind": 0, "never_pushed": 0}
+    for c in composers:
+        cid = c.get("composerId")
+        if not cid:
+            continue
+        status = get_push_status_for_conversation(cid, project_id)
+        counts[status] = counts.get(status, 0) + 1
+
+    parts = []
+    if counts["up_to_date"]:
+        parts.append(f"{counts['up_to_date']} synced")
+    if counts["local_ahead"]:
+        parts.append(f"{counts['local_ahead']} ahead")
+    if counts["behind"]:
+        parts.append(f"{counts['behind']} behind")
+    if counts["never_pushed"]:
+        parts.append(f"{counts['never_pushed']} not pushed")
+
+    return ", ".join(parts) if parts else ""
+
+
 def cmd_workspaces(args):
     """List Cursor workspaces that have conversations."""
     from datetime import datetime, timezone
@@ -184,22 +236,18 @@ def cmd_workspaces(args):
         print("No workspaces with conversations found.")
         return
 
-    print(f"{'#':<4} {'Type':<6} {'Path':<50} {'Host':<15} {'Chats':>5}  {'Last Active'}")
-    print("-" * 110)
+    print(f"{'#':<4} {'Type':<6} {'Path':<40} {'Host':<12} {'Chats':>5}  {'Sync Status'}")
+    print("-" * 105)
 
     for i, ws in enumerate(workspaces, 1):
         path = ws["path"]
-        if len(path) > 48:
-            path = "..." + path[-45:]
+        if len(path) > 38:
+            path = "..." + path[-35:]
         host = ws["host"] or ""
         convos = ws.get("conversations", 0)
-        if ws["mtime"]:
-            dt = datetime.fromtimestamp(ws["mtime"], tz=timezone.utc)
-            active = dt.strftime("%Y-%m-%d %H:%M")
-        else:
-            active = "unknown"
+        sync = _workspace_sync_summary(ws)
 
-        print(f"{i:<4} {ws['type']:<6} {path:<50} {host:<15} {convos:>5}  {active}")
+        print(f"{i:<4} {ws['type']:<6} {path:<40} {host:<12} {convos:>5}  {sync}")
 
     print(f"\n{len(workspaces)} workspace(s) with conversations")
     print("\nUse 'cursaves push -w <number>' to push a specific workspace.")
@@ -244,10 +292,16 @@ def cmd_snapshots(args):
             exported = (meta.get("exportedAt") or "")[:16] or "unknown"
             source_host = meta.get("sourceHost")
             source = source_host or meta.get("sourceMachine") or "unknown"
+            cid = meta.get("composerId")
+            if cid:
+                status = get_sync_status_for_snapshot(cid, msgs)
+                status_label = f"[{format_sync_status(status)}]"
+            else:
+                status_label = ""
 
-            if len(chat_name) > 40:
-                chat_name = chat_name[:37] + "..."
-            print(f"    {chat_name:<42} {msgs:>5} msgs  saved {exported}  from {source}")
+            if len(chat_name) > 36:
+                chat_name = chat_name[:33] + "..."
+            print(f"    {chat_name:<38} {msgs:>5} msgs  from {source:<16} {status_label}")
 
     print(f"\n{len(projects)} project(s) with snapshots")
     print(f"\nUse 'cursaves pull -s' to interactively select which to import.")
@@ -567,24 +621,25 @@ def _select_workspace() -> tuple[str, "Path", str | None] | None:
 
     Returns (project_path, workspace_dir, host) for the selected workspace, or None.
     """
-    workspaces = paths.list_all_workspaces()
+    workspaces = paths.list_workspaces_with_conversations()
     if not workspaces:
         print("No Cursor workspaces found.")
         return None
 
     print(f"\nCursor workspaces (most recent first)\n")
-    print(f"  {'#':<4} {'Project':<50} {'Path'}")
-    print(f"  {'-' * 90}")
+    print(f"  {'#':<4} {'Project':<40} {'Chats':>5}  {'Sync Status'}")
+    print(f"  {'-' * 80}")
 
     for i, ws in enumerate(workspaces, 1):
         name = os.path.basename(os.path.normpath(ws["path"])) or ws["path"]
         ws_type = ws.get("type", "local")
         host = ws.get("host", "")
         label = f"{name} ({host})" if host else name
-        path = ws["path"]
-        if len(path) > 50:
-            path = "..." + path[-47:]
-        print(f"  {i:<4} {label:<50} {path}")
+        if len(label) > 38:
+            label = label[:35] + "..."
+        convos = ws.get("conversations", 0)
+        sync = _workspace_sync_summary(ws)
+        print(f"  {i:<4} {label:<40} {convos:>5}  {sync}")
 
     print(f"\nSelect a workspace:")
     try:
@@ -623,16 +678,19 @@ def _select_conversations(project_path: str, prompt: str = "push", workspace_dir
     conversations.sort(key=lambda c: c.get("lastUpdated", ""), reverse=True)
 
     project_name = os.path.basename(os.path.normpath(project_path)) or project_path
+    project_id = paths.get_project_identifier(project_path)
     print(f"\n  Conversations in {project_name}  ({len(conversations)} total)\n")
-    print(f"  {'#':<4} {'Name':<40} {'Msgs':>5}  {'Last Updated'}")
-    print(f"  {'-' * 75}")
+    print(f"  {'#':<4} {'Name':<36} {'Msgs':>5}  {'Last Updated':<20} {'Status'}")
+    print(f"  {'-' * 95}")
 
     for i, c in enumerate(conversations, 1):
         name = c["name"]
-        if len(name) > 38:
-            name = name[:35] + "..."
+        if len(name) > 34:
+            name = name[:31] + "..."
+        status = get_push_status_for_conversation(c["id"], project_id)
+        status_label = format_sync_status(status)
         print(
-            f"  {i:<4} {name:<40} {c['messageCount']:>5}  {c['lastUpdated']}"
+            f"  {i:<4} {name:<36} {c['messageCount']:>5}  {c['lastUpdated']:<20} {status_label}"
         )
 
     print(f"\n  Select chats to {prompt} (e.g. 1,3,5 or 1-3 or 'all') [all]:")
@@ -852,6 +910,7 @@ def cmd_pull(args):
                 source_host = meta.get("sourceHost")
                 snapshots_info.append({
                     "file": sf,
+                    "composerId": meta.get("composerId"),
                     "name": meta.get("name") or "Untitled",
                     "msgs": meta.get("messageCount", 0),
                     "exported": (meta.get("exportedAt") or "")[:16] or "unknown",
@@ -863,14 +922,23 @@ def cmd_pull(args):
                 continue
 
             print(f"\n  Chats in {project['name']}:\n")
-            print(f"  {'#':<4} {'Name':<40} {'Msgs':>5}  {'Saved':<20} {'From'}")
+            print(f"  {'#':<4} {'Name':<36} {'Msgs':>5}  {'From':<16} {'Local Status'}")
             print(f"  {'-' * 90}")
 
             for i, si in enumerate(snapshots_info, 1):
                 name = si["name"]
-                if len(name) > 38:
-                    name = name[:35] + "..."
-                print(f"  {i:<4} {name:<40} {si['msgs']:>5}  {si['exported']:<20} {si['source']}")
+                if len(name) > 34:
+                    name = name[:31] + "..."
+                cid = si.get("composerId")
+                if cid:
+                    status = get_sync_status_for_snapshot(cid, si["msgs"])
+                    status_label = format_sync_status(status)
+                else:
+                    status_label = ""
+                source = si["source"]
+                if len(source) > 14:
+                    source = source[:11] + "..."
+                print(f"  {i:<4} {name:<36} {si['msgs']:>5}  {source:<16} {status_label}")
 
             print(f"\n  Select chats to import (e.g. 1,3,5 or 1-3 or 'all') [all]:")
             try:

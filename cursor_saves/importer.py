@@ -178,21 +178,28 @@ def _check_conflict(
     global_db_path: Path,
     composer_id: str,
     incoming_bubble_ids: set[str],
+    incoming_header_ids: Optional[set[str]] = None,
 ) -> str:
     """Compare local chat state against incoming snapshot.
 
+    Compares both bubble IDs and conversation header IDs to determine
+    the relationship. This is necessary because bubbles can exist locally
+    (from a previous import) without being listed in the composerData
+    headers, making bubble-only comparison misleading.
+
     Returns one of:
-      "new"          - chat doesn't exist locally
-      "identical"    - same messages in both
-      "incoming_newer" - incoming has all local messages plus more
-      "local_ahead"  - local has all incoming messages plus more (local is ahead)
-      "diverged"     - both have messages the other doesn't
+      "new"            - chat doesn't exist locally
+      "identical"      - same messages in both
+      "incoming_newer" - incoming has content the local doesn't
+      "local_ahead"    - local has all incoming content plus more
+      "diverged"       - both have content the other doesn't
     """
     if not global_db_path.exists():
         return "new"
 
     with db.CursorDB(global_db_path) as cdb:
         local_keys = cdb.list_keys(f"bubbleId:{composer_id}:")
+        local_data = cdb.get_json(f"composerData:{composer_id}")
 
     if not local_keys:
         return "new"
@@ -203,14 +210,28 @@ def _check_conflict(
     prefix_len = len(f"bubbleId:{composer_id}:")
     local_bubble_ids = {k[prefix_len:] for k in local_keys}
 
-    local_only = local_bubble_ids - incoming_bubble_ids
-    incoming_only = incoming_bubble_ids - local_bubble_ids
+    local_only_bubbles = local_bubble_ids - incoming_bubble_ids
+    incoming_only_bubbles = incoming_bubble_ids - local_bubble_ids
 
-    if not local_only and not incoming_only:
+    # Also compare headers if provided
+    local_header_ids = set()
+    if local_data:
+        local_header_ids = {
+            h.get("bubbleId") for h in local_data.get("fullConversationHeadersOnly", [])
+            if h.get("bubbleId")
+        }
+    incoming_only_headers = set()
+    if incoming_header_ids:
+        incoming_only_headers = incoming_header_ids - local_header_ids
+
+    has_local_only = bool(local_only_bubbles)
+    has_incoming_only = bool(incoming_only_bubbles) or bool(incoming_only_headers)
+
+    if not has_local_only and not has_incoming_only:
         return "identical"
-    elif local_only and incoming_only:
+    elif has_local_only and has_incoming_only:
         return "diverged"
-    elif local_only:
+    elif has_local_only:
         return "local_ahead"
     else:
         return "incoming_newer"
@@ -268,25 +289,61 @@ def import_snapshot(
     # ── Conflict check ──────────────────────────────────────────────
     global_db_path = paths.get_global_db_path()
     incoming_bubble_ids = set(bubble_entries.keys())
-    conflict = _check_conflict(global_db_path, composer_id, incoming_bubble_ids)
+    incoming_header_ids = {
+        h.get("bubbleId") for h in headers if h.get("bubbleId")
+    }
+    conflict = _check_conflict(
+        global_db_path, composer_id, incoming_bubble_ids, incoming_header_ids,
+    )
     chat_name = composer_data.get("name", "Untitled")
     source_label = snapshot.get("sourceHost") or snapshot.get("sourceMachine") or "remote"
 
     if conflict == "local_ahead":
-        print(f"  Skipped: \"{chat_name}\" — local is ahead of snapshot ({source_label})")
+        with db.CursorDB(global_db_path) as cdb:
+            ld = cdb.get_json(f"composerData:{composer_id}")
+        local_count = len((ld or {}).get("fullConversationHeadersOnly", []))
+        snap_count = len(headers)
+        print(
+            f"  Skipped: \"{chat_name}\" — local has {local_count} msgs, "
+            f"snapshot has {snap_count} (local is newer, nothing to import)"
+        )
         return True
 
     if conflict == "identical":
-        print(f"  Skipped: \"{chat_name}\" — already up to date")
+        print(f"  Skipped: \"{chat_name}\" — already up to date ({len(headers)} msgs)")
         return True
 
+    if conflict == "new":
+        print(f"  New chat: \"{chat_name}\" ({len(headers)} msgs from {source_label})")
+
+    if conflict == "incoming_newer":
+        with db.CursorDB(global_db_path) as cdb:
+            ld = cdb.get_json(f"composerData:{composer_id}")
+        local_count = len((ld or {}).get("fullConversationHeadersOnly", []))
+        snap_count = len(headers)
+        print(
+            f"  Updating: \"{chat_name}\" — local has {local_count} msgs, "
+            f"snapshot has {snap_count} from {source_label}"
+        )
+
     if conflict == "diverged":
+        # Both local and incoming have unique messages — they've branched.
+        # Keep the local version untouched and import the incoming snapshot
+        # as a separate conversation with a new ID and a renamed title.
         new_id = str(uuid.uuid4())
-        print(f"  Diverged: \"{chat_name}\" — local and {source_label} both have unique messages")
-        print(f"  Importing as \"{chat_name} (from {source_label})\" to preserve both")
-        composer_id = new_id
-        composer_data["name"] = f"{chat_name} (from {source_label})"
+        new_name = f"{chat_name} (from {source_label})"
         composer_data["composerId"] = new_id
+        composer_data["name"] = new_name
+        # Remap all bubble entries and message contexts to the new ID
+        bubble_entries = {bid: bdata for bid, bdata in bubble_entries.items()}
+        message_contexts = {k: v for k, v in message_contexts.items()}
+        composer_id = new_id
+        print(
+            f"  Diverged: \"{chat_name}\" — local and {source_label} both have unique messages"
+        )
+        print(
+            f"            Importing as separate chat: \"{new_name}\""
+        )
 
     # ── Step 1: Backup global DB ────────────────────────────────────
     if not skip_backup and global_db_path.exists():
@@ -399,13 +456,116 @@ def import_snapshot(
             if not sample:
                 print("  WARNING: bubble entries not found in global DB after write!", file=sys.stderr)
                 return False
-            print(f"  Verified: composerData + {len(bubble_entries)} bubble entries written")
+
+        final_name = composer_data.get("name", chat_name)
+        final_msgs = len(written.get("fullConversationHeadersOnly", []))
+        if conflict == "new":
+            print(f"  Imported: \"{final_name}\" ({final_msgs} msgs, {len(bubble_entries)} bubbles)")
+        elif conflict == "diverged":
+            print(f"  Copied: \"{final_name}\" ({final_msgs} msgs) — original \"{chat_name}\" left unchanged")
+        elif conflict == "incoming_newer":
+            print(f"  Updated: \"{final_name}\" → {final_msgs} msgs")
         else:
-            print(f"  Verified: composerData written")
+            print(f"  Done: \"{final_name}\" ({final_msgs} msgs)")
     finally:
         verify_cdb.close()
 
     return True
+
+
+def get_sync_status_for_snapshot(
+    composer_id: str,
+    snapshot_msg_count: int,
+) -> str:
+    """Lightweight sync status check using only message counts.
+
+    Compares the local header count against the snapshot's messageCount
+    from the .meta.json sidecar (no decompression needed).
+
+    Returns one of:
+      "not_local"     - conversation doesn't exist in local DB
+      "up_to_date"    - same message count
+      "local_ahead"   - local has more messages than snapshot
+      "behind"        - snapshot has more messages than local
+    """
+    global_db_path = paths.get_global_db_path()
+    if not global_db_path.exists():
+        return "not_local"
+
+    with db.CursorDB(global_db_path) as cdb:
+        local_data = cdb.get_json(f"composerData:{composer_id}")
+
+    if not local_data:
+        return "not_local"
+
+    local_count = len(local_data.get("fullConversationHeadersOnly", []))
+
+    if local_count == snapshot_msg_count:
+        return "up_to_date"
+    elif local_count > snapshot_msg_count:
+        return "local_ahead"
+    else:
+        return "behind"
+
+
+def get_push_status_for_conversation(
+    composer_id: str,
+    project_identifier: str,
+) -> str:
+    """Check whether a local conversation has been pushed and if the snapshot is current.
+
+    Returns one of:
+      "never_pushed"  - no snapshot exists for this conversation
+      "up_to_date"    - snapshot matches local message count
+      "local_ahead"   - local has more messages than the snapshot
+      "behind"        - snapshot has more messages (pushed from elsewhere)
+    """
+    snapshots_dir = paths.get_snapshots_dir()
+    project_dir = snapshots_dir / project_identifier
+    if not project_dir.exists():
+        return "never_pushed"
+
+    # Look for a snapshot matching this composer ID
+    meta_path = project_dir / f"{composer_id}.meta.json"
+    if not meta_path.exists():
+        return "never_pushed"
+
+    try:
+        meta = json.loads(meta_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return "never_pushed"
+
+    snapshot_count = meta.get("messageCount", 0)
+    global_db_path = paths.get_global_db_path()
+
+    with db.CursorDB(global_db_path) as cdb:
+        local_data = cdb.get_json(f"composerData:{composer_id}")
+
+    if not local_data:
+        return "never_pushed"
+
+    local_count = len(local_data.get("fullConversationHeadersOnly", []))
+
+    if local_count == snapshot_count:
+        return "up_to_date"
+    elif local_count > snapshot_count:
+        return "local_ahead"
+    else:
+        return "behind"
+
+
+_SYNC_STATUS_LABELS = {
+    "not_local": "new",
+    "up_to_date": "synced",
+    "local_ahead": "ahead",
+    "behind": "behind",
+    "never_pushed": "not pushed",
+}
+
+
+def format_sync_status(status: str) -> str:
+    """Return a short human-readable label for a sync status."""
+    return _SYNC_STATUS_LABELS.get(status, status)
 
 
 def list_snapshot_projects(snapshots_dir: Optional[Path] = None) -> list[dict]:
