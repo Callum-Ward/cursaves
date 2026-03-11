@@ -58,7 +58,17 @@ This is what Cursor reads to populate the **sidebar** -- the list of conversatio
 
 This single database stores the actual conversation content for **all projects**. It has the same two tables (`ItemTable`, `cursorDiskKV`), but the important data is in `cursorDiskKV`.
 
-Each conversation is stored under a key `composerData:{UUID}`, where the UUID matches the `composerId` from the workspace DB. The value is a large JSON blob containing the full conversation state.
+The global DB stores five types of entries for each conversation, all keyed by `composerId`:
+
+| Key pattern | Content |
+|-------------|---------|
+| `composerData:{composerId}` | Conversation metadata, headers, and state |
+| `bubbleId:{composerId}:{bubbleId}` | Individual message content (one per message) |
+| `checkpointId:{composerId}:{checkpointId}` | Workspace state snapshots (file diffs per agent turn) |
+| `messageRequestContext:{composerId}:{messageId}` | Full request context sent to the model |
+| `composer.content.{hash}` | Content-addressed blobs (shared across conversations) |
+
+All of these are required for a conversation to be fully functional on another machine. Missing `composerData` or `bubbleId` entries means the conversation can't render. Missing `checkpointId` entries means the conversation can't be continued (agent mode fails with "Blob not found").
 
 ### How a conversation loads
 
@@ -119,7 +129,7 @@ Each `composerData:{UUID}` entry in the global DB is a JSON object with this str
 | Field | Description |
 |-------|-------------|
 | `fullConversationHeadersOnly` | Ordered list of messages. Each has a `bubbleId` (UUID) and a `type` (1 = user, 2 = assistant). |
-| `conversationMap` | Actual message content, keyed by bubble ID. |
+| `conversationMap` | Legacy message content, keyed by bubble ID. Empty in newer conversations. |
 | `context` | What files, folders, terminals, docs, rules, etc. were attached as context. |
 | `unifiedMode` | The conversation mode: `"agent"`, `"chat"`, `"plan"`, `"edit"`. |
 | `modelConfig` | Which model was used. |
@@ -134,6 +144,78 @@ Each `composerData:{UUID}` entry in the global DB is a JSON object with this str
 ### Subagent conversations
 
 When the agent spawns subagents (e.g., for exploration tasks), they get their own `composerId` with a prefix like `task-toolu_...`. These appear as separate conversations in the workspace DB.
+
+## Individual Bubble Entries (v3 storage)
+
+**Location:** `globalStorage/state.vscdb`, `cursorDiskKV` table, keys matching `bubbleId:{composerId}:{bubbleId}`
+
+As of early 2026, Cursor stores message content as individual key-value entries rather than in the `conversationMap` field inside `composerData`. Each message gets its own entry keyed by `bubbleId:{composerId}:{bubbleId}`.
+
+A typical bubble entry contains ~60+ fields. Some notable ones:
+
+| Field | Description |
+|-------|-------------|
+| `text` | The actual message text (user prompt or assistant response) |
+| `type` | 1 = user, 2 = assistant |
+| `richText` | Structured representation of user input (present on user messages) |
+| `context` | Context attached to this specific message |
+| `codeBlocks` | Code blocks in assistant responses |
+| `suggestedCodeBlocks` | Diffs the assistant proposed |
+| `toolResults` | Results from tool calls (file edits, terminal commands, etc.) |
+| `checkpointId` | Reference to a workspace checkpoint (user messages in agent mode) |
+| `allThinkingBlocks` | The model's chain-of-thought reasoning blocks |
+| `createdAt` | Timestamp for this individual message |
+
+A conversation with 1000 messages will have 1000 separate `bubbleId:` entries in the global DB. The `composerData` entry's `fullConversationHeadersOnly` array provides the ordering, while the actual content lives in these individual entries.
+
+### How to identify the storage format
+
+- **Legacy (v1/v2):** `conversationMap` in `composerData` is populated with message content
+- **Current (v3):** `conversationMap` is empty or absent; messages are in `bubbleId:` entries
+
+Both formats use `fullConversationHeadersOnly` as the ordered message index.
+
+## Checkpoint Data
+
+**Location:** `globalStorage/state.vscdb`, `cursorDiskKV` table, keys matching `checkpointId:{composerId}:{checkpointId}`
+
+When running in agent mode, Cursor takes a workspace state snapshot before each agent turn. These checkpoints record which files were modified and the diffs applied, so the agent can restore the workspace to a known state if it needs to retry or the user wants to continue the conversation later.
+
+Each checkpoint is a JSON object:
+
+```json
+{
+  "files": [
+    {
+      "uri": {
+        "path": "/path/to/file.py",
+        "scheme": "vscode-remote",
+        "authority": "ssh-remote+hostname"
+      },
+      "originalModelDiffWrtV0": [
+        {
+          "original": { "startLineNumber": 10, "endLineNumberExclusive": 15 },
+          "modified": ["new line 1", "new line 2"]
+        }
+      ]
+    }
+  ],
+  "nonExistentFiles": [],
+  "newlyCreatedFolders": [],
+  "activeInlineDiffs": [],
+  "inlineDiffNewlyCreatedResources": []
+}
+```
+
+User messages (type 1) reference checkpoints via their `checkpointId` field in the bubble entry. When continuing a conversation, the agent loop reads the checkpoint referenced by the last user message to restore the workspace state. **If the checkpoint is missing, Cursor fails with an "[internal] Blob not found" error** and the conversation cannot be continued.
+
+A long conversation can accumulate hundreds of checkpoints. They compress well (mostly text diffs) — a conversation with 189 checkpoints is roughly 9 MB uncompressed / 1.4 MB compressed.
+
+## Message Request Contexts
+
+**Location:** `globalStorage/state.vscdb`, `cursorDiskKV` table, keys matching `messageRequestContext:{composerId}:{messageId}`
+
+Each user message can have an associated request context that captures the full state of what was sent to the model. This includes file contents, git diffs, terminal output, and other context that was part of the request. These are supplementary — the conversation is readable without them, but they enable richer replay and continuation.
 
 ## Content Cache
 
