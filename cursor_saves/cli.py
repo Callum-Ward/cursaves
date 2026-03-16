@@ -707,11 +707,173 @@ def _select_conversations(project_path: str, prompt: str = "push", workspace_dir
     return [conversations[i - 1]["id"] for i in indices]
 
 
+def _push_ahead(sync_dir: Path):
+    """Find all conversations ahead of their snapshots and push them.
+
+    Scans every workspace, groups ahead conversations by workspace,
+    displays them for confirmation, then pushes.
+    """
+    from .watch import _git_has_remote
+
+    if _git_has_remote(sync_dir):
+        print("Syncing with remote...", end="", flush=True)
+        if _git_reset_to_origin(sync_dir):
+            print(" done")
+        else:
+            print(" failed (continuing with local state)", file=sys.stderr)
+
+    workspaces = paths.list_workspaces_with_conversations()
+    if not workspaces:
+        print("No Cursor workspaces found.")
+        return
+
+    from . import db as _db
+
+    # Collect conversations that are ahead per workspace
+    ahead_items: list[dict] = []
+
+    for ws in workspaces:
+        ws_dir = ws["workspace_dir"]
+        db_path = ws_dir / "state.vscdb"
+        if not db_path.exists():
+            continue
+
+        try:
+            with _db.CursorDB(db_path) as cdb:
+                data = cdb.get_json("composer.composerData", table="ItemTable")
+        except Exception:
+            continue
+        if not data:
+            continue
+
+        project_id = paths.get_project_identifier(ws["path"])
+        composers = data.get("allComposers", [])
+
+        for c in composers:
+            cid = c.get("composerId")
+            if not cid:
+                continue
+            status = get_push_status_for_conversation(cid, project_id)
+            if status in ("local_ahead", "never_pushed"):
+                ws_name = os.path.basename(os.path.normpath(ws["path"])) or ws["path"]
+                host = ws.get("host", "")
+                ws_label = f"{ws_name} ({host})" if host else ws_name
+                ahead_items.append({
+                    "composerId": cid,
+                    "name": c.get("name", "Untitled"),
+                    "workspace_label": ws_label,
+                    "workspace_dir": ws_dir,
+                    "project_path": ws["path"],
+                    "host": host,
+                    "status": status,
+                })
+
+    if not ahead_items:
+        print("All conversations are up to date with snapshots.")
+        return
+
+    print(f"\n  {len(ahead_items)} conversation(s) ahead of snapshots:\n")
+    print(f"  {'#':<4} {'Name':<36} {'Workspace':<25} {'Status'}")
+    print(f"  {'-' * 90}")
+
+    for i, item in enumerate(ahead_items, 1):
+        name = item["name"]
+        if len(name) > 34:
+            name = name[:31] + "..."
+        ws_label = item["workspace_label"]
+        if len(ws_label) > 23:
+            ws_label = ws_label[:20] + "..."
+        status_label = format_sync_status(item["status"])
+        print(f"  {i:<4} {name:<36} {ws_label:<25} {status_label}")
+
+    print(f"\n  Push these? (e.g. 1,3,5 or 1-3 or 'all') [all]:")
+    try:
+        choice = input("  > ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+
+    if not choice:
+        choice = "all"
+
+    indices = _parse_selection(choice, len(ahead_items))
+    if not indices:
+        print("No conversations selected.")
+        return
+
+    selected = [ahead_items[i - 1] for i in indices]
+
+    # Group by (project_path, workspace_dir) to batch exports
+    from collections import defaultdict
+    by_workspace: dict[tuple, list[dict]] = defaultdict(list)
+    for item in selected:
+        key = (item["project_path"], str(item["workspace_dir"]))
+        by_workspace[key].append(item)
+
+    total_saved = 0
+    for (project_path, ws_dir_str), items in by_workspace.items():
+        ws_dir = Path(ws_dir_str)
+        host = items[0].get("host")
+        composer_ids = [it["composerId"] for it in items]
+        saved = export.checkpoint_project(
+            project_path,
+            composer_ids=composer_ids,
+            workspace_dir=ws_dir,
+            source_host=host or None,
+        )
+        total_saved += len(saved)
+
+    if total_saved == 0:
+        print("No conversations exported.")
+        return
+
+    print(f"\n  {total_saved} conversation(s) checkpointed")
+
+    # Git commit + push
+    subprocess.run(["git", "add", "snapshots/"], cwd=str(sync_dir), capture_output=True)
+    result = subprocess.run(
+        ["git", "diff", "--cached", "--quiet"],
+        cwd=str(sync_dir),
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        print("  No changes to commit (snapshots already up to date)")
+        return
+
+    hostname = paths.get_machine_id()
+    msg = f"[{hostname}] push {total_saved} ahead conversation(s)"
+    subprocess.run(["git", "commit", "-m", msg], cwd=str(sync_dir), capture_output=True)
+    print(f"  Committed")
+
+    if _git_has_remote(sync_dir):
+        print("  Pushing...", end="", flush=True)
+        try:
+            push_result = subprocess.run(
+                ["git", "push", "-u", "origin", "main"],
+                cwd=str(sync_dir),
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if push_result.returncode == 0:
+                print(" done")
+            else:
+                print(f" failed: {push_result.stderr.strip()}", file=sys.stderr)
+        except subprocess.TimeoutExpired:
+            print(" timed out (changes saved locally)", file=sys.stderr)
+
+    print(f"\nDone. {total_saved} conversation(s) pushed.")
+
+
 def cmd_push(args):
     """Checkpoint + git commit + push in one command."""
     from .watch import _git_has_remote
 
     sync_dir = _require_sync_repo()
+
+    if getattr(args, "ahead", False):
+        _push_ahead(sync_dir)
+        return
 
     # Step 0: Reset to origin (remote is ground truth)
     if _git_has_remote(sync_dir):
@@ -1435,6 +1597,10 @@ def main():
     p_push.add_argument(
         "--all", dest="all_chats", action="store_true",
         help="Push all conversations without selection prompt",
+    )
+    p_push.add_argument(
+        "--ahead", "-a", action="store_true",
+        help="Find and push all conversations ahead of snapshots across all workspaces",
     )
     p_push.set_defaults(func=cmd_push)
 
