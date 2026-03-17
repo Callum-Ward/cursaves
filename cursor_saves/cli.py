@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import __version__, export, paths
+from . import __version__, db, export, paths
 from .importer import (
     copy_between_workspaces,
     find_snapshot_dir_for_project,
@@ -21,6 +21,7 @@ from .importer import (
     list_snapshot_files,
     read_snapshot_file,
     read_snapshot_meta,
+    repair_missing_blobs,
 )
 
 
@@ -73,13 +74,13 @@ def _git_reset_to_origin(sync_dir: Path) -> bool:
         return True
 
     try:
-        # Fetch latest from origin
+        # Fetch latest from origin (--depth 1 keeps the repo lean)
         fetch_result = subprocess.run(
-            ["git", "fetch", "origin"],
+            ["git", "fetch", "--depth", "1", "origin"],
             cwd=str(sync_dir),
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=180,
         )
         if fetch_result.returncode != 0:
             return False
@@ -178,21 +179,20 @@ def _resolve_workspace_for_import(args) -> tuple[str, "Path | None"]:
     return project_path, None
 
 
-def _workspace_sync_summary(ws: dict) -> str:
+def _workspace_sync_summary(ws: dict, _global_cdb: "Optional[db.CursorDB]" = None) -> str:
     """Compute a short sync summary for a workspace.
 
     Reads the workspace's conversations and checks each against snapshots.
+    Pass _global_cdb to avoid re-copying the global DB per workspace.
     Returns a string like "3 synced, 2 not pushed" or "5 synced".
     """
-    from . import db as _db
-
     ws_dir = ws["workspace_dir"]
     db_path = ws_dir / "state.vscdb"
     if not db_path.exists():
         return ""
 
     try:
-        with _db.CursorDB(db_path) as cdb:
+        with db.CursorDB(db_path) as cdb:
             data = cdb.get_json("composer.composerData", table="ItemTable")
     except Exception:
         return ""
@@ -211,7 +211,7 @@ def _workspace_sync_summary(ws: dict) -> str:
         cid = c.get("composerId")
         if not cid:
             continue
-        status = get_push_status_for_conversation(cid, project_id)
+        status = get_push_status_for_conversation(cid, project_id, _cdb=_global_cdb)
         counts[status] = counts.get(status, 0) + 1
 
     parts = []
@@ -239,15 +239,21 @@ def cmd_workspaces(args):
     print(f"{'#':<4} {'Type':<6} {'Path':<40} {'Host':<12} {'Chats':>5}  {'Sync Status'}")
     print("-" * 105)
 
-    for i, ws in enumerate(workspaces, 1):
-        path = ws["path"]
-        if len(path) > 38:
-            path = "..." + path[-35:]
-        host = ws["host"] or ""
-        convos = ws.get("conversations", 0)
-        sync = _workspace_sync_summary(ws)
+    global_db_path = paths.get_global_db_path()
+    global_cdb = db.CursorDB(global_db_path) if global_db_path.exists() else None
+    try:
+        for i, ws in enumerate(workspaces, 1):
+            path = ws["path"]
+            if len(path) > 38:
+                path = "..." + path[-35:]
+            host = ws["host"] or ""
+            convos = ws.get("conversations", 0)
+            sync = _workspace_sync_summary(ws, _global_cdb=global_cdb)
 
-        print(f"{i:<4} {ws['type']:<6} {path:<40} {host:<12} {convos:>5}  {sync}")
+            print(f"{i:<4} {ws['type']:<6} {path:<40} {host:<12} {convos:>5}  {sync}")
+    finally:
+        if global_cdb:
+            global_cdb.close()
 
     print(f"\n{len(workspaces)} workspace(s) with conversations")
     print("\nUse 'cursaves push -w <number>' to push a specific workspace.")
@@ -279,29 +285,34 @@ def cmd_snapshots(args):
         print("Run 'cursaves push' to checkpoint and push conversations.")
         return
 
-    for i, p in enumerate(projects, 1):
-        name = p["name"]
-        print(f"\n  {name}/ ({p['count']} snapshot(s))")
+    global_db_path = paths.get_global_db_path()
+    global_cdb = db.CursorDB(global_db_path) if global_db_path.exists() else None
+    try:
+        for i, p in enumerate(projects, 1):
+            name = p["name"]
+            print(f"\n  {name}/ ({p['count']} snapshot(s))")
 
-        # Show individual snapshots with dates
-        snapshot_files = list_snapshot_files(p["path"])
-        for sf in snapshot_files:
-            meta = read_snapshot_meta(sf)
-            chat_name = meta.get("name") or "Untitled"
-            msgs = meta.get("messageCount", 0)
-            exported = (meta.get("exportedAt") or "")[:16] or "unknown"
-            source_host = meta.get("sourceHost")
-            source = source_host or meta.get("sourceMachine") or "unknown"
-            cid = meta.get("composerId")
-            if cid:
-                status = get_sync_status_for_snapshot(cid, msgs)
-                status_label = f"[{format_sync_status(status)}]"
-            else:
-                status_label = ""
+            snapshot_files = list_snapshot_files(p["path"])
+            for sf in snapshot_files:
+                meta = read_snapshot_meta(sf)
+                chat_name = meta.get("name") or "Untitled"
+                msgs = meta.get("messageCount", 0)
+                exported = (meta.get("exportedAt") or "")[:16] or "unknown"
+                source_host = meta.get("sourceHost")
+                source = source_host or meta.get("sourceMachine") or "unknown"
+                cid = meta.get("composerId")
+                if cid:
+                    status = get_sync_status_for_snapshot(cid, msgs, _cdb=global_cdb)
+                    status_label = f"[{format_sync_status(status)}]"
+                else:
+                    status_label = ""
 
-            if len(chat_name) > 36:
-                chat_name = chat_name[:33] + "..."
-            print(f"    {chat_name:<38} {msgs:>5} msgs  from {source:<16} {status_label}")
+                if len(chat_name) > 36:
+                    chat_name = chat_name[:33] + "..."
+                print(f"    {chat_name:<38} {msgs:>5} msgs  from {source:<16} {status_label}")
+    finally:
+        if global_cdb:
+            global_cdb.close()
 
     print(f"\n{len(projects)} project(s) with snapshots")
     print(f"\nUse 'cursaves pull -s' to interactively select which to import.")
@@ -630,16 +641,22 @@ def _select_workspace() -> tuple[str, "Path", str | None] | None:
     print(f"  {'#':<4} {'Project':<40} {'Chats':>5}  {'Sync Status'}")
     print(f"  {'-' * 80}")
 
-    for i, ws in enumerate(workspaces, 1):
-        name = os.path.basename(os.path.normpath(ws["path"])) or ws["path"]
-        ws_type = ws.get("type", "local")
-        host = ws.get("host", "")
-        label = f"{name} ({host})" if host else name
-        if len(label) > 38:
-            label = label[:35] + "..."
-        convos = ws.get("conversations", 0)
-        sync = _workspace_sync_summary(ws)
-        print(f"  {i:<4} {label:<40} {convos:>5}  {sync}")
+    global_db_path = paths.get_global_db_path()
+    global_cdb = db.CursorDB(global_db_path) if global_db_path.exists() else None
+    try:
+        for i, ws in enumerate(workspaces, 1):
+            name = os.path.basename(os.path.normpath(ws["path"])) or ws["path"]
+            ws_type = ws.get("type", "local")
+            host = ws.get("host", "")
+            label = f"{name} ({host})" if host else name
+            if len(label) > 38:
+                label = label[:35] + "..."
+            convos = ws.get("conversations", 0)
+            sync = _workspace_sync_summary(ws, _global_cdb=global_cdb)
+            print(f"  {i:<4} {label:<40} {convos:>5}  {sync}")
+    finally:
+        if global_cdb:
+            global_cdb.close()
 
     print(f"\nSelect a workspace:")
     try:
@@ -683,15 +700,17 @@ def _select_conversations(project_path: str, prompt: str = "push", workspace_dir
     print(f"  {'#':<4} {'Name':<36} {'Msgs':>5}  {'Last Updated':<20} {'Status'}")
     print(f"  {'-' * 95}")
 
-    for i, c in enumerate(conversations, 1):
-        name = c["name"]
-        if len(name) > 34:
-            name = name[:31] + "..."
-        status = get_push_status_for_conversation(c["id"], project_id)
-        status_label = format_sync_status(status)
-        print(
-            f"  {i:<4} {name:<36} {c['messageCount']:>5}  {c['lastUpdated']:<20} {status_label}"
-        )
+    global_db_path = paths.get_global_db_path()
+    with db.CursorDB(global_db_path) as global_cdb:
+        for i, c in enumerate(conversations, 1):
+            name = c["name"]
+            if len(name) > 34:
+                name = name[:31] + "..."
+            status = get_push_status_for_conversation(c["id"], project_id, _cdb=global_cdb)
+            status_label = format_sync_status(status)
+            print(
+                f"  {i:<4} {name:<36} {c['messageCount']:>5}  {c['lastUpdated']:<20} {status_label}"
+            )
 
     print(f"\n  Select chats to {prompt} (e.g. 1,3,5 or 1-3 or 'all') [all]:")
     try:
@@ -707,114 +726,72 @@ def _select_conversations(project_path: str, prompt: str = "push", workspace_dir
     return [conversations[i - 1]["id"] for i in indices]
 
 
-def _push_ahead(sync_dir: Path):
-    """Find all conversations ahead of their snapshots and push them.
-
-    Scans every workspace, groups ahead conversations by workspace,
-    displays them for confirmation, then pushes.
-    """
-    from .watch import _git_has_remote
-
-    if _git_has_remote(sync_dir):
-        print("Syncing with remote...", end="", flush=True)
-        if _git_reset_to_origin(sync_dir):
-            print(" done")
-        else:
-            print(" failed (continuing with local state)", file=sys.stderr)
-
+def _find_ahead_conversations() -> list[dict]:
+    """Scan all workspaces for conversations that are ahead of their snapshots."""
     workspaces = paths.list_workspaces_with_conversations()
-    if not workspaces:
-        print("No Cursor workspaces found.")
-        return
-
-    from . import db as _db
-
-    # Collect conversations that are ahead per workspace
     ahead_items: list[dict] = []
 
-    for ws in workspaces:
-        ws_dir = ws["workspace_dir"]
-        db_path = ws_dir / "state.vscdb"
-        if not db_path.exists():
-            continue
+    global_db_path = paths.get_global_db_path()
+    if not global_db_path.exists():
+        return ahead_items
 
-        try:
-            with _db.CursorDB(db_path) as cdb:
-                data = cdb.get_json("composer.composerData", table="ItemTable")
-        except Exception:
-            continue
-        if not data:
-            continue
-
-        project_id = paths.get_project_identifier(ws["path"])
-        composers = data.get("allComposers", [])
-
-        for c in composers:
-            cid = c.get("composerId")
-            if not cid:
+    with db.CursorDB(global_db_path) as global_cdb:
+        for ws in workspaces:
+            ws_dir = ws["workspace_dir"]
+            db_path = ws_dir / "state.vscdb"
+            if not db_path.exists():
                 continue
-            status = get_push_status_for_conversation(cid, project_id)
-            if status in ("local_ahead", "never_pushed"):
-                ws_name = os.path.basename(os.path.normpath(ws["path"])) or ws["path"]
-                host = ws.get("host", "")
-                ws_label = f"{ws_name} ({host})" if host else ws_name
-                ahead_items.append({
-                    "composerId": cid,
-                    "name": c.get("name", "Untitled"),
-                    "workspace_label": ws_label,
-                    "workspace_dir": ws_dir,
-                    "project_path": ws["path"],
-                    "host": host,
-                    "status": status,
-                })
 
-    if not ahead_items:
-        print("All conversations are up to date with snapshots.")
-        return
+            try:
+                with db.CursorDB(db_path) as cdb:
+                    data = cdb.get_json("composer.composerData", table="ItemTable")
+            except Exception:
+                continue
+            if not data:
+                continue
 
-    print(f"\n  {len(ahead_items)} conversation(s) ahead of snapshots:\n")
-    print(f"  {'#':<4} {'Name':<36} {'Workspace':<25} {'Status'}")
-    print(f"  {'-' * 90}")
+            project_id = paths.get_project_identifier(ws["path"])
+            composers = data.get("allComposers", [])
 
-    for i, item in enumerate(ahead_items, 1):
-        name = item["name"]
-        if len(name) > 34:
-            name = name[:31] + "..."
-        ws_label = item["workspace_label"]
-        if len(ws_label) > 23:
-            ws_label = ws_label[:20] + "..."
-        status_label = format_sync_status(item["status"])
-        print(f"  {i:<4} {name:<36} {ws_label:<25} {status_label}")
+            for c in composers:
+                cid = c.get("composerId")
+                if not cid:
+                    continue
+                status = get_push_status_for_conversation(cid, project_id, _cdb=global_cdb)
+                if status == "local_ahead":
+                    ws_name = os.path.basename(os.path.normpath(ws["path"])) or ws["path"]
+                    host = ws.get("host", "")
+                    ws_label = f"{ws_name} ({host})" if host else ws_name
+                    ahead_items.append({
+                        "composerId": cid,
+                        "name": c.get("name", "Untitled"),
+                        "workspace_label": ws_label,
+                        "workspace_dir": ws_dir,
+                        "project_path": ws["path"],
+                        "host": host,
+                    })
 
-    print(f"\n  Push these? (e.g. 1,3,5 or 1-3 or 'all') [all]:")
-    try:
-        choice = input("  > ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return
+    return ahead_items
 
-    if not choice:
-        choice = "all"
 
-    indices = _parse_selection(choice, len(ahead_items))
-    if not indices:
-        print("No conversations selected.")
-        return
+def _export_and_push(sync_dir: Path, items: list[dict]) -> int:
+    """Export a list of ahead conversation items, git commit, and push.
 
-    selected = [ahead_items[i - 1] for i in indices]
-
-    # Group by (project_path, workspace_dir) to batch exports
+    Returns the number of conversations successfully exported.
+    """
+    from .watch import _git_has_remote
     from collections import defaultdict
+
     by_workspace: dict[tuple, list[dict]] = defaultdict(list)
-    for item in selected:
+    for item in items:
         key = (item["project_path"], str(item["workspace_dir"]))
         by_workspace[key].append(item)
 
     total_saved = 0
-    for (project_path, ws_dir_str), items in by_workspace.items():
+    for (project_path, ws_dir_str), ws_items in by_workspace.items():
         ws_dir = Path(ws_dir_str)
-        host = items[0].get("host")
-        composer_ids = [it["composerId"] for it in items]
+        host = ws_items[0].get("host")
+        composer_ids = [it["composerId"] for it in ws_items]
         saved = export.checkpoint_project(
             project_path,
             composer_ids=composer_ids,
@@ -824,12 +801,8 @@ def _push_ahead(sync_dir: Path):
         total_saved += len(saved)
 
     if total_saved == 0:
-        print("No conversations exported.")
-        return
+        return 0
 
-    print(f"\n  {total_saved} conversation(s) checkpointed")
-
-    # Git commit + push
     subprocess.run(["git", "add", "snapshots/"], cwd=str(sync_dir), capture_output=True)
     result = subprocess.run(
         ["git", "diff", "--cached", "--quiet"],
@@ -837,13 +810,11 @@ def _push_ahead(sync_dir: Path):
         capture_output=True,
     )
     if result.returncode == 0:
-        print("  No changes to commit (snapshots already up to date)")
-        return
+        return total_saved
 
     hostname = paths.get_machine_id()
     msg = f"[{hostname}] push {total_saved} ahead conversation(s)"
     subprocess.run(["git", "commit", "-m", msg], cwd=str(sync_dir), capture_output=True)
-    print(f"  Committed")
 
     if _git_has_remote(sync_dir):
         print("  Pushing...", end="", flush=True)
@@ -862,7 +833,291 @@ def _push_ahead(sync_dir: Path):
         except subprocess.TimeoutExpired:
             print(" timed out (changes saved locally)", file=sys.stderr)
 
-    print(f"\nDone. {total_saved} conversation(s) pushed.")
+    return total_saved
+
+
+def _push_ahead(sync_dir: Path, auto: bool = False) -> int:
+    """Find conversations ahead of snapshots and push them.
+
+    Args:
+        sync_dir: The sync repo directory.
+        auto: If True, skip prompts and push all ahead conversations.
+
+    Returns the number of conversations pushed.
+    """
+    from .watch import _git_has_remote
+
+    if not auto:
+        if _git_has_remote(sync_dir):
+            print("Syncing with remote...", end="", flush=True)
+            if _git_reset_to_origin(sync_dir):
+                print(" done")
+            else:
+                print(" failed (continuing with local state)", file=sys.stderr)
+
+    ahead_items = _find_ahead_conversations()
+
+    if not ahead_items:
+        if not auto:
+            print("All synced conversations are up to date.")
+        return 0
+
+    if auto:
+        print(f"  Pushing {len(ahead_items)} ahead conversation(s)...")
+        for item in ahead_items:
+            name = item["name"]
+            if len(name) > 40:
+                name = name[:37] + "..."
+            print(f"    {name} [{item['workspace_label']}]")
+        total = _export_and_push(sync_dir, ahead_items)
+        return total
+
+    print(f"\n  {len(ahead_items)} conversation(s) ahead of snapshots:\n")
+    print(f"  {'#':<4} {'Name':<36} {'Workspace'}")
+    print(f"  {'-' * 70}")
+
+    for i, item in enumerate(ahead_items, 1):
+        name = item["name"]
+        if len(name) > 34:
+            name = name[:31] + "..."
+        ws_label = item["workspace_label"]
+        if len(ws_label) > 30:
+            ws_label = ws_label[:27] + "..."
+        print(f"  {i:<4} {name:<36} {ws_label}")
+
+    print(f"\n  Push these? (e.g. 1,3,5 or 1-3 or 'all') [all]:")
+    try:
+        choice = input("  > ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 0
+
+    if not choice:
+        choice = "all"
+
+    indices = _parse_selection(choice, len(ahead_items))
+    if not indices:
+        print("No conversations selected.")
+        return 0
+
+    selected = [ahead_items[i - 1] for i in indices]
+    total = _export_and_push(sync_dir, selected)
+
+    if total == 0:
+        print("No conversations exported.")
+    else:
+        print(f"\n  {total} conversation(s) checkpointed")
+
+    print(f"\nDone. {total} conversation(s) pushed.")
+    return total
+
+
+def _get_sync_state_path() -> Path:
+    """Path for local sync state (outside the git repo to survive git clean)."""
+    return Path.home() / ".config" / "cursaves" / "sync_state.json"
+
+
+def _load_sync_state() -> dict:
+    """Load the local sync state (tracks diverged snapshots to avoid re-importing)."""
+    state_path = _get_sync_state_path()
+    if state_path.exists():
+        try:
+            return json.loads(state_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save_sync_state(state: dict):
+    """Persist the local sync state."""
+    state_path = _get_sync_state_path()
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(state, indent=2))
+
+
+def _pull_behind(sync_dir: Path) -> int:
+    """Find all snapshots where local is behind and import them automatically.
+
+    For each behind/new snapshot, finds workspaces that already have the
+    conversation registered and imports only into those.  This prevents
+    duplicating imports across every matching workspace.
+
+    Returns the number of snapshots successfully imported.
+    """
+    projects = list_snapshot_projects()
+    if not projects:
+        return 0
+
+    global_db_path = paths.get_global_db_path()
+    global_cdb = db.CursorDB(global_db_path) if global_db_path.exists() else None
+
+    sync_state = _load_sync_state()
+    handled = sync_state.get("handled_diverged", {})
+
+    total_imported = 0
+    backed_up_global = False
+    backed_up_ws: set[str] = set()
+
+    try:
+        for project in projects:
+            snapshot_files = list_snapshot_files(project["path"])
+            if not snapshot_files:
+                continue
+
+            behind_snapshots: list[tuple[Path, dict]] = []
+            for sf in snapshot_files:
+                meta = read_snapshot_meta(sf)
+                cid = meta.get("composerId")
+                if not cid:
+                    continue
+
+                # Skip snapshots we've already handled as diverged
+                msg_count = meta.get("messageCount", 0)
+                prev_handled = handled.get(cid)
+                if prev_handled and prev_handled >= msg_count:
+                    continue
+
+                status = get_sync_status_for_snapshot(cid, msg_count, _cdb=global_cdb)
+                if status in ("behind", "not_local"):
+                    behind_snapshots.append((sf, meta))
+
+            if not behind_snapshots:
+                continue
+
+            # Find all matching workspaces for this project
+            all_matches = []
+            seen_ws_dirs: set[str] = set()
+            for sp in sorted(project.get("source_paths", set())):
+                matches = paths.find_all_matching_workspaces(sp)
+                for ws in matches:
+                    ws_dir_str = str(ws["workspace_dir"])
+                    if ws_dir_str not in seen_ws_dirs:
+                        seen_ws_dirs.add(ws_dir_str)
+                        all_matches.append(ws)
+
+            if not all_matches:
+                continue
+
+            # Build a map: composerId -> list of workspaces that have it registered
+            cid_to_workspaces: dict[str, list[dict]] = {}
+            for ws in all_matches:
+                ws_db_path = ws["workspace_dir"] / "state.vscdb"
+                if not ws_db_path.exists():
+                    continue
+                try:
+                    with db.CursorDB(ws_db_path) as wdb:
+                        ws_data = wdb.get_json("composer.composerData", table="ItemTable")
+                except Exception:
+                    continue
+                if not ws_data:
+                    continue
+                registered_ids = {
+                    c.get("composerId")
+                    for c in ws_data.get("allComposers", [])
+                    if c.get("composerId")
+                }
+                for sf, meta in behind_snapshots:
+                    cid = meta.get("composerId", "")
+                    if cid in registered_ids:
+                        cid_to_workspaces.setdefault(cid, []).append(ws)
+
+            for sf, meta in behind_snapshots:
+                cid = meta.get("composerId", "")
+                target_list = cid_to_workspaces.get(cid, [])
+
+                if not target_list:
+                    # Not registered anywhere — pick the first matching workspace
+                    target_list = all_matches[:1]
+
+                for ws in target_list:
+                    if not backed_up_global and global_db_path.exists():
+                        db.backup_db(global_db_path)
+                        backed_up_global = True
+
+                    ws_dir_str = str(ws["workspace_dir"])
+                    if ws_dir_str not in backed_up_ws:
+                        ws_db_path = ws["workspace_dir"] / "state.vscdb"
+                        if ws_db_path.exists():
+                            db.backup_db(ws_db_path)
+                        backed_up_ws.add(ws_dir_str)
+
+                    ok = import_snapshot(
+                        sf, ws["path"],
+                        target_workspace_dir=ws["workspace_dir"],
+                        skip_backup=True,
+                    )
+                    if ok:
+                        total_imported += 1
+
+                # Record that we've handled this snapshot at this message count
+                # so diverged conversations don't get re-imported every sync
+                msg_count = meta.get("messageCount", 0)
+                handled[cid] = msg_count
+    finally:
+        if global_cdb:
+            global_cdb.close()
+
+    # Persist sync state so handled diverged snapshots are remembered
+    sync_state["handled_diverged"] = handled
+    _save_sync_state(sync_state)
+
+    return total_imported
+
+
+def cmd_repair(args):
+    """Repair conversations with missing agent blobs by restoring from snapshots."""
+    print("Scanning for missing blobs...")
+    fixed, restored = repair_missing_blobs(verbose=True)
+    if fixed > 0:
+        print(f"\nRepaired {fixed} conversation(s), restored {restored} blob(s).")
+        print("Restart Cursor to apply fixes.")
+    elif restored == 0 and fixed == 0:
+        print("\nNo blobs could be restored from available snapshots.")
+        print("To fix remaining conversations, re-push them from the original machine")
+        print("using the latest cursaves (which exports agent blobs).")
+
+
+def cmd_sync(args):
+    """Pull behind conversations then push ahead ones — fully automatic."""
+    sync_dir = _require_sync_repo()
+    from .watch import _git_has_remote
+
+    # Step 1: Sync with remote
+    if _git_has_remote(sync_dir):
+        print("Syncing with remote...", end="", flush=True)
+        if _git_reset_to_origin(sync_dir):
+            print(" done")
+        else:
+            print(" failed", file=sys.stderr)
+            return
+
+    # Step 2: Pull — import snapshots where local is behind
+    print("\n── Pull ──")
+    imported = _pull_behind(sync_dir)
+    if imported > 0:
+        print(f"  Imported {imported} conversation(s)")
+    else:
+        print("  Everything up to date")
+
+    # Step 3: Push — export conversations where local is ahead
+    print("\n── Push ──")
+    pushed = _push_ahead(sync_dir, auto=True)
+    if pushed == 0:
+        print("  Nothing to push")
+
+    # Summary
+    print()
+    if imported > 0 or pushed > 0:
+        parts = []
+        if imported > 0:
+            parts.append(f"{imported} pulled")
+        if pushed > 0:
+            parts.append(f"{pushed} pushed")
+        print(f"Sync complete: {', '.join(parts)}.")
+        if imported > 0:
+            print("Restart Cursor to see imported chats.")
+    else:
+        print("Already in sync.")
 
 
 def cmd_push(args):
@@ -1626,6 +1881,18 @@ def main():
         help="(deprecated, no effect) Cursor requires a full restart to see imports",
     )
     p_pull.set_defaults(func=cmd_pull)
+
+    # ── sync ──────────────────────────────────────────────────────
+    p_sync = subparsers.add_parser(
+        "sync", help="Pull behind + push ahead — one command to stay in sync across machines"
+    )
+    p_sync.set_defaults(func=cmd_sync)
+
+    # ── repair ─────────────────────────────────────────────────────
+    p_repair = subparsers.add_parser(
+        "repair", help="Restore missing agent blobs from snapshots (fixes 'Blob not found' errors)"
+    )
+    p_repair.set_defaults(func=cmd_repair)
 
     # ── reload ─────────────────────────────────────────────────────
     p_reload = subparsers.add_parser(

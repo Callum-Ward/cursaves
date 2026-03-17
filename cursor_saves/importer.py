@@ -495,11 +495,14 @@ def import_snapshot(
 def get_sync_status_for_snapshot(
     composer_id: str,
     snapshot_msg_count: int,
+    _cdb: "Optional[db.CursorDB]" = None,
 ) -> str:
     """Lightweight sync status check using only message counts.
 
     Compares the local header count against the snapshot's messageCount
     from the .meta.json sidecar (no decompression needed).
+
+    Pass an open CursorDB via _cdb to avoid re-copying the global DB.
 
     Returns one of:
       "not_local"     - conversation doesn't exist in local DB
@@ -507,12 +510,14 @@ def get_sync_status_for_snapshot(
       "local_ahead"   - local has more messages than snapshot
       "behind"        - snapshot has more messages than local
     """
-    global_db_path = paths.get_global_db_path()
-    if not global_db_path.exists():
-        return "not_local"
-
-    with db.CursorDB(global_db_path) as cdb:
-        local_data = cdb.get_json(f"composerData:{composer_id}")
+    if _cdb is not None:
+        local_data = _cdb.get_json(f"composerData:{composer_id}")
+    else:
+        global_db_path = paths.get_global_db_path()
+        if not global_db_path.exists():
+            return "not_local"
+        with db.CursorDB(global_db_path) as cdb:
+            local_data = cdb.get_json(f"composerData:{composer_id}")
 
     if not local_data:
         return "not_local"
@@ -530,8 +535,11 @@ def get_sync_status_for_snapshot(
 def get_push_status_for_conversation(
     composer_id: str,
     project_identifier: str,
+    _cdb: "Optional[db.CursorDB]" = None,
 ) -> str:
     """Check whether a local conversation has been pushed and if the snapshot is current.
+
+    Pass an open CursorDB via _cdb to avoid re-copying the global DB.
 
     Returns one of:
       "never_pushed"  - no snapshot exists for this conversation
@@ -544,7 +552,6 @@ def get_push_status_for_conversation(
     if not project_dir.exists():
         return "never_pushed"
 
-    # Look for a snapshot matching this composer ID
     meta_path = project_dir / f"{composer_id}.meta.json"
     if not meta_path.exists():
         return "never_pushed"
@@ -555,10 +562,13 @@ def get_push_status_for_conversation(
         return "never_pushed"
 
     snapshot_count = meta.get("messageCount", 0)
-    global_db_path = paths.get_global_db_path()
 
-    with db.CursorDB(global_db_path) as cdb:
-        local_data = cdb.get_json(f"composerData:{composer_id}")
+    if _cdb is not None:
+        local_data = _cdb.get_json(f"composerData:{composer_id}")
+    else:
+        global_db_path = paths.get_global_db_path()
+        with db.CursorDB(global_db_path) as cdb:
+            local_data = cdb.get_json(f"composerData:{composer_id}")
 
     if not local_data:
         return "never_pushed"
@@ -986,3 +996,129 @@ def copy_between_workspaces(
         write_cdb.close()
 
     return success, failure
+
+
+# ── Blob repair ──────────────────────────────────────────────────────────
+
+
+def repair_missing_blobs(verbose: bool = False) -> tuple[int, int]:
+    """Scan all conversations for missing agentKv blobs and backfill from snapshots.
+
+    Returns (conversations_repaired, blobs_restored).
+    """
+    import base64
+    from .export import _extract_agent_blob_ids
+
+    global_db_path = paths.get_global_db_path()
+    if not global_db_path.exists():
+        return 0, 0
+
+    snapshots_dir = paths.get_snapshots_dir()
+    if not snapshots_dir.exists():
+        return 0, 0
+
+    # Phase 1: Find conversations with missing blobs
+    missing_map: dict[str, set[str]] = {}  # composerId -> set of missing blob hex IDs
+
+    with db.CursorDB(global_db_path) as cdb:
+        all_keys = cdb.list_keys("composerData:")
+        for key in all_keys:
+            cd = cdb.get_json(key)
+            if not cd:
+                continue
+            refs = _extract_agent_blob_ids(cd)
+            if not refs:
+                continue
+
+            missing = set()
+            for bid in refs:
+                val = cdb.get_item_binary(f"agentKv:blob:{bid}", table="cursorDiskKV")
+                if val is None:
+                    missing.add(bid)
+
+            if missing:
+                cid = key.split(":", 1)[1]
+                missing_map[cid] = missing
+
+    if not missing_map:
+        if verbose:
+            print("  No conversations with missing blobs.")
+        return 0, 0
+
+    all_missing_ids = set()
+    for s in missing_map.values():
+        all_missing_ids |= s
+
+    if verbose:
+        print(f"  {len(missing_map)} conversation(s) with {len(all_missing_ids)} unique missing blob(s)")
+
+    # Phase 2: Scan snapshots that contain agentBlobs (version >= 3).
+    # Only decompress snapshots that might contain the missing blobs.
+    restored_blobs: dict[str, bytes] = {}
+
+    for project_dir in snapshots_dir.iterdir():
+        if not project_dir.is_dir():
+            continue
+        for sf in list_snapshot_files(project_dir):
+            if not all_missing_ids - set(restored_blobs.keys()):
+                break
+
+            meta = read_snapshot_meta(sf)
+            if meta.get("version", 1) < 3:
+                continue
+
+            if verbose:
+                print(f"  Scanning: {sf.name}")
+
+            try:
+                snap = read_snapshot_file(sf)
+            except Exception:
+                continue
+
+            snap_blobs = snap.get("agentBlobs", {})
+            if not snap_blobs:
+                continue
+
+            found_any = False
+            for bid, b64val in snap_blobs.items():
+                if bid in all_missing_ids and bid not in restored_blobs:
+                    try:
+                        restored_blobs[bid] = base64.b64decode(b64val)
+                        found_any = True
+                    except Exception:
+                        pass
+
+            if found_any and verbose:
+                count = sum(1 for b in snap_blobs if b in all_missing_ids)
+                print(f"    Found {count} matching blob(s)")
+
+        if not all_missing_ids - set(restored_blobs.keys()):
+            break
+
+    if not restored_blobs:
+        if verbose:
+            still_missing = len(all_missing_ids)
+            print(f"  No matching blobs found in snapshots ({still_missing} still missing)")
+        return 0, 0
+
+    # Phase 3: Write restored blobs to the global DB
+    backup_path = db.backup_db(global_db_path)
+    if verbose:
+        print(f"  Backed up global DB to {backup_path.name}")
+
+    with db.CursorDB(global_db_path) as cdb:
+        cdb.write_batch([
+            (f"agentKv:blob:{bid}", val)
+            for bid, val in restored_blobs.items()
+        ])
+
+    conversations_fixed = 0
+    for cid, missing in missing_map.items():
+        if missing & set(restored_blobs.keys()):
+            conversations_fixed += 1
+
+    remaining = len(all_missing_ids) - len(restored_blobs)
+    if verbose and remaining > 0:
+        print(f"  {remaining} blob(s) not found in any snapshot (from conversations not yet pushed)")
+
+    return conversations_fixed, len(restored_blobs)
