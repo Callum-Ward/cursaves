@@ -15,6 +15,7 @@ Cursor stores chats locally. Switch machines and they're gone. This tool saves y
 | **Workspace hash** | The opaque directory name under `workspaceStorage/`; use with `-w` when number/path doesn't work (e.g. custom workspaces) |
 | **Project ID**     | How cursaves groups snapshots - based on git remote URL or directory name                                                    |
 | **Snapshot**       | An exported chat saved to `~/.cursaves/snapshots/<project-id>/`                                                              |
+| **Alias**          | A custom name for a project's snapshot directory (overrides the auto-derived project ID)                                     |
 
 ### Chat → Workspace → Project Mapping
 
@@ -198,6 +199,24 @@ All commands default to the current working directory as the project path. Use `
 
 Most of the time you only need `push` and `pull`. Use `push -s` when you want to push only specific conversations instead of everything. Use `delete` to clean up snapshots you no longer need.
 
+### Custom snapshot names with `--alias`
+
+By default, snapshots are stored under a directory named after your project's git remote URL (e.g. `snapshots/github.com-user-myapp/`) or directory basename. Use `--alias` to give it a name you choose instead.
+
+```bash
+# Push and store under snapshots/my-feature/ instead of the auto-derived name
+cursaves push --alias my-feature
+
+# On another machine: pull from snapshots/my-feature/ directly
+cursaves pull --alias my-feature
+```
+
+The alias is recorded in `~/.cursaves/aliases.json` (git-tracked), so it syncs to every machine automatically. The original auto-derived project ID is preserved in the file for reference.
+
+This is useful when:
+- You want to keep snapshots for different branches or workstreams of the same project in separate directories
+- You push from a custom `.code-workspace` file and want a cleaner name in the git repo
+
 ### Auto-sync with `watch`
 
 ```bash
@@ -361,6 +380,9 @@ The daemon handles checkpoint + git push/pull automatically. When you switch mac
   snapshots/
     github.com-user-repo/      # Identified by git remote URL
       <composer-id>.json       # Self-contained conversation snapshot
+    my-alias/                  # Custom name set with --alias
+      <composer-id>.json
+  aliases.json                 # alias → original project ID mapping (git-tracked)
 
 ~/.local/bin/cursaves          # Global CLI tool (installed via uv)
 

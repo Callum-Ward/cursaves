@@ -326,6 +326,31 @@ def get_snapshots_dir() -> Path:
     return snapshots
 
 
+def get_aliases_path() -> Path:
+    """Return the path to the git-tracked aliases file (~/.cursaves/aliases.json)."""
+    return get_sync_dir() / "aliases.json"
+
+
+def load_aliases() -> dict:
+    """Load project aliases from ~/.cursaves/aliases.json.
+
+    Returns a dict mapping alias name → { "projectIdentifier": str, "createdAt": str }.
+    """
+    p = get_aliases_path()
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def save_aliases(aliases: dict) -> None:
+    """Persist aliases to ~/.cursaves/aliases.json."""
+    p = get_aliases_path()
+    p.write_text(json.dumps(aliases, indent=2))
+
+
 def is_sync_repo_initialized() -> bool:
     """Check if the sync directory is a git repo."""
     sync_dir = get_sync_dir()
@@ -405,16 +430,20 @@ def format_workspace_display(ws: dict, include_path: bool = True) -> str:
 # ── Project identification ────────────────────────────────────────────
 
 
-def get_project_identifier(project_path: str) -> str:
+def get_project_identifier(project_path: str, alias: Optional[str] = None) -> str:
     """Get a stable identifier for a project, used as the snapshot subdirectory.
 
-    Uses the git remote origin URL if available (normalized to a filesystem-safe
-    string).  Falls back to the directory basename for non-git projects.
+    If alias is given, it is used directly as the identifier (overrides auto-detection).
+
+    Otherwise uses the git remote origin URL if available (normalized to a
+    filesystem-safe string), falling back to the directory basename.
 
     This means:
       - Same repo under different local names (bob/ vs alice/) → same identifier
       - Different repos that happen to share a name → different identifiers
     """
+    if alias:
+        return alias
     remote_url = _get_git_remote_url(project_path)
     if remote_url:
         return _normalize_remote_url(remote_url)

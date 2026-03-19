@@ -321,6 +321,7 @@ def export_conversation(
     composer_id: str,
     _cdb: Optional[db.CursorDB] = None,
     source_host: Optional[str] = None,
+    alias: Optional[str] = None,
 ) -> Optional[dict]:
     """Export a single conversation to a self-contained snapshot dict.
 
@@ -329,6 +330,7 @@ def export_conversation(
 
     Pass an open CursorDB via _cdb to avoid re-copying the global DB.
     Pass source_host for SSH workspaces (e.g. "core-3").
+    Pass alias to override the snapshot directory name in ~/.cursaves/snapshots/.
     """
     global_db = paths.get_global_db_path()
     own_cdb = _cdb is None
@@ -386,7 +388,7 @@ def export_conversation(
             "sourceMachine": paths.get_machine_id(),
             "sourceHost": source_host,
             "sourceProjectPath": os.path.normpath(project_path),
-            "projectIdentifier": paths.get_project_identifier(project_path),
+            "projectIdentifier": paths.get_project_identifier(project_path, alias=alias),
             "composerId": composer_id,
             "composerData": conv_data,
             "contentBlobs": blobs,
@@ -550,12 +552,15 @@ def checkpoint_project(
     composer_ids: Optional[list[str]] = None,
     workspace_dir: Optional[Path] = None,
     source_host: Optional[str] = None,
+    alias: Optional[str] = None,
 ) -> list[Path]:
     """Export conversations for a project to snapshots/.
 
     If composer_ids is given, only export those conversations.
     If workspace_dir is given, only reads from that specific workspace.
     Otherwise, export all conversations from all matching workspaces.
+    If alias is given, snapshots are stored under snapshots/<alias>/ instead of
+    the auto-derived project identifier.
 
     Returns list of saved snapshot file paths.
     """
@@ -584,7 +589,9 @@ def checkpoint_project(
     with db.CursorDB(global_db) as cdb:
         for i, (c, composer_id) in enumerate(to_process, 1):
             # Export the conversation
-            snapshot = export_conversation(project_path, composer_id, _cdb=cdb, source_host=source_host)
+            snapshot = export_conversation(
+                project_path, composer_id, _cdb=cdb, source_host=source_host, alias=alias
+            )
             if snapshot:
                 path = save_snapshot(snapshot, snapshots_dir)
                 saved.append(path)
