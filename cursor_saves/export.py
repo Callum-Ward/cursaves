@@ -4,6 +4,7 @@ import gzip
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -516,21 +517,40 @@ def checkpoint_project(
     Returns list of saved snapshot file paths.
     """
     snapshots_dir = paths.get_snapshots_dir()
-    conversations = get_workspace_conversations(project_path, workspace_dir=workspace_dir)
-    saved = []
 
+    t0 = time.time()
+    print("  Fetching workspace conversations...", file=sys.stderr, flush=True)
+    conversations = get_workspace_conversations(project_path, workspace_dir=workspace_dir)
+    print(f"  Found {len(conversations)} conversation(s) in workspace(s)", file=sys.stderr, flush=True)
+
+    # Filter to selected ids and count how many we'll actually process
+    to_process: list[tuple[dict, str]] = []
+    for c in conversations:
+        composer_id: str | None = c.get("composerId")
+        if not composer_id:
+            continue
+        if composer_ids is not None and composer_id not in composer_ids:
+            continue
+        to_process.append((c, composer_id))
+
+    print(f"  Processing {len(to_process)} conversation(s)...", file=sys.stderr, flush=True)
+
+    last_log_time = t0
+    saved = []
     global_db = paths.get_global_db_path()
     with db.CursorDB(global_db) as cdb:
-        for c in conversations:
-            composer_id = c.get("composerId")
-            if not composer_id:
-                continue
-            if composer_ids is not None and composer_id not in composer_ids:
-                continue
-
+        for i, (c, composer_id) in enumerate(to_process, 1):
+            # Export the conversation
             snapshot = export_conversation(project_path, composer_id, _cdb=cdb, source_host=source_host)
             if snapshot:
                 path = save_snapshot(snapshot, snapshots_dir)
                 saved.append(path)
+            
+            # Log progress: every 10 items, or every 10 seconds since last log
+            if i % 10 == 0 or (time.time() - last_log_time) >= 10:
+                print(f"  [{i}/{len(to_process)}] {composer_id}", file=sys.stderr, flush=True)
+                last_log_time = time.time()
 
+    total = time.time() - t0
+    print(f"  Completed in {total:.1f}s", file=sys.stderr, flush=True)
     return saved
