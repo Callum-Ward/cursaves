@@ -295,10 +295,6 @@ def resolve_workspace(selector: str) -> Optional[dict]:
         if ws["workspace_dir"].name == selector:
             return ws
 
-    for ws in list_all_workspaces():
-        if ws["workspace_dir"].name == selector:
-            return ws
-
     # Try as path substring
     for ws in workspaces:
         if selector in ws["path"]:
