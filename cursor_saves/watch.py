@@ -102,9 +102,9 @@ def _git_sync(repo_root: Path, project_path: str) -> tuple[bool, str]:
         if pull_result.returncode != 0:
             return False, f"git pull failed: {pull_result.stderr.strip()}"
 
-        # Stage snapshot files
+        # Stage snapshot files (-A stages deletions too, so pruned files are removed)
         add_result = subprocess.run(
-            ["git", "add", "snapshots/"],
+            ["git", "add", "-A", "snapshots/"],
             capture_output=True,
             text=True,
             cwd=str(repo_root),
@@ -219,6 +219,13 @@ def watch_loop(
             if saved:
                 checkpoint_count += 1
                 print(f"[{_now()}] checkpointed {len(saved)} conversation(s) (total: {checkpoint_count})")
+
+                # Prune removed conversations so they don't linger in git
+                project_dir = saved[0].parent
+                kept_ids = {export._composer_id_from_snapshot_path(p) for p in saved}
+                pruned = export.prune_project_snapshots(project_dir, kept_ids)
+                if pruned > 0:
+                    print(f"[{_now()}] pruned {pruned} removed conversation(s)")
 
                 # Git sync
                 if git_sync and repo_root:
