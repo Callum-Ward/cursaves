@@ -502,6 +502,49 @@ def save_snapshot(snapshot: dict, snapshots_dir: Path) -> Path:
     return snapshot_file
 
 
+def _composer_id_from_snapshot_path(path: Path) -> str:
+    """Extract composer ID from a snapshot filename (e.g. uuid.json.gz -> uuid)."""
+    name = path.name
+    if name.endswith(".json.gz"):
+        return name[:-8]
+    if name.endswith(".json"):
+        return name[:-5]
+    return path.stem
+
+
+def prune_project_snapshots(project_dir: Path, composer_ids_to_keep: set[str]) -> int:
+    """Remove snapshot files whose composer_id is not in the keep set.
+
+    Deletes the snapshot file (or shards), its .meta.json sidecar, and any
+    legacy .json files. Use after checkpoint_project to ensure removed
+    conversations don't linger in git.
+
+    Returns the number of snapshots pruned.
+    """
+    from .importer import list_snapshot_files
+
+    keep = set(composer_ids_to_keep)
+    pruned = 0
+    for sf in list_snapshot_files(project_dir):
+        cid = _composer_id_from_snapshot_path(sf)
+        if cid in keep:
+            continue
+        # Delete snapshot, shards, and meta
+        if sf.exists():
+            sf.unlink()
+        for shard in project_dir.glob(f"{cid}.json.gz.*"):
+            if not shard.name.endswith(".meta.json"):
+                shard.unlink()
+        meta = project_dir / f"{cid}.meta.json"
+        if meta.exists():
+            meta.unlink()
+        legacy = project_dir / f"{cid}.json"
+        if legacy.exists():
+            legacy.unlink()
+        pruned += 1
+    return pruned
+
+
 def checkpoint_project(
     project_path: str,
     composer_ids: Optional[list[str]] = None,

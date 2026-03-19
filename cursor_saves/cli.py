@@ -802,7 +802,7 @@ def _export_and_push(sync_dir: Path, items: list[dict]) -> int:
     if total_saved == 0:
         return 0
 
-    subprocess.run(["git", "add", "snapshots/"], cwd=str(sync_dir), capture_output=True)
+    subprocess.run(["git", "add", "-A", "snapshots/"], cwd=str(sync_dir), capture_output=True)
     result = subprocess.run(
         ["git", "diff", "--cached", "--quiet"],
         cwd=str(sync_dir),
@@ -1169,8 +1169,16 @@ def cmd_push(args):
 
     print(f"  {len(saved)} conversation(s) checkpointed")
 
-    # Step 2: Git add + commit + push
-    subprocess.run(["git", "add", "snapshots/"], cwd=str(sync_dir), capture_output=True)
+    # Prune old snapshots: remove any files for conversations not in this push
+    # (so removed convos don't linger in git)
+    project_dir = saved[0].parent
+    kept_ids = {export._composer_id_from_snapshot_path(p) for p in saved}
+    pruned = export.prune_project_snapshots(project_dir, kept_ids)
+    if pruned > 0:
+        print(f"  Pruned {pruned} removed conversation(s) from snapshots")
+
+    # Step 2: Git add + commit + push (-A stages deletions too)
+    subprocess.run(["git", "add", "-A", "snapshots/"], cwd=str(sync_dir), capture_output=True)
 
     # Check if there's anything to commit
     result = subprocess.run(
