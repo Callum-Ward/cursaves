@@ -6,8 +6,10 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 from . import __version__, db, export, paths
+from .backends import GitBackend, S3Backend, SyncBackend, get_backend, load_config, save_config
 from .importer import (
     copy_between_workspaces,
     find_snapshot_dir_for_project,
@@ -51,72 +53,14 @@ from .reload import print_reload_hint
 from .watch import watch_loop
 
 
-def _git_reset_to_origin(sync_dir: Path) -> bool:
-    """Reset hard to origin/main. Remote is always ground truth. Returns True on success."""
-    from .watch import _git_has_remote
-
-    if not sync_dir.exists():
-        return False
-
-    # Abort any in-progress rebase/merge/cherry-pick
-    rebase_dir = sync_dir / ".git" / "rebase-merge"
-    rebase_apply_dir = sync_dir / ".git" / "rebase-apply"
-    if rebase_dir.exists() or rebase_apply_dir.exists():
-        subprocess.run(["git", "rebase", "--abort"], cwd=str(sync_dir), capture_output=True)
-    
-    # Also try to abort merge if in progress
-    subprocess.run(["git", "merge", "--abort"], cwd=str(sync_dir), capture_output=True)
-    subprocess.run(["git", "cherry-pick", "--abort"], cwd=str(sync_dir), capture_output=True)
-
-    if not _git_has_remote(sync_dir):
-        # No remote, just ensure we're on main
-        subprocess.run(["git", "checkout", "-f", "-B", "main"], cwd=str(sync_dir), capture_output=True)
-        return True
-
-    try:
-        # Fetch latest from origin (--depth 1 keeps the repo lean)
-        fetch_result = subprocess.run(
-            ["git", "fetch", "--depth", "1", "origin"],
-            cwd=str(sync_dir),
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-        if fetch_result.returncode != 0:
-            return False
-
-        # Force checkout to main and reset hard (discard all local state)
-        subprocess.run(
-            ["git", "checkout", "-f", "-B", "main", "origin/main"],
-            cwd=str(sync_dir),
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "reset", "--hard", "origin/main"],
-            cwd=str(sync_dir),
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "branch", "--set-upstream-to=origin/main", "main"],
-            cwd=str(sync_dir),
-            capture_output=True,
-        )
-        # Clean up any untracked files
-        subprocess.run(
-            ["git", "clean", "-fd"],
-            cwd=str(sync_dir),
-            capture_output=True,
-        )
-        return True
-    except subprocess.TimeoutExpired:
-        return False
-
 
 def _ensure_synced() -> None:
-    """Reset to origin to ensure we have the latest state. Remote is ground truth."""
-    sync_dir = paths.get_sync_dir()
-    if sync_dir.exists():
-        _git_reset_to_origin(sync_dir)
+    """Pull latest from remote to ensure we have the latest state."""
+    if paths.is_sync_repo_initialized():
+        backend = get_backend()
+        snapshots_dir = paths.get_snapshots_dir()
+        if backend.has_remote():
+            backend.pull(snapshots_dir)
 
 
 def _resolve_project(args) -> str:
@@ -319,78 +263,87 @@ def cmd_snapshots(args):
 
 
 def cmd_init(args):
-    """Initialize the sync directory (~/.cursaves/) as a git repo."""
+    """Initialize cursaves sync — git repo or S3 bucket."""
     sync_dir = paths.get_sync_dir()
     snapshots_dir = sync_dir / "snapshots"
+    backend_type = getattr(args, "backend", None) or "git"
 
-    if paths.is_sync_repo_initialized():
-        print(f"Sync repo already initialized at {sync_dir}")
-        # Allow adding/updating remote on an existing repo
-        if args.remote:
-            # Check if remote already exists
-            result = subprocess.run(
-                ["git", "remote", "get-url", "origin"],
-                cwd=str(sync_dir),
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 0:
-                old_remote = result.stdout.strip()
-                if old_remote == args.remote:
-                    print(f"  Remote already set to {args.remote}")
-                else:
-                    subprocess.run(
-                        ["git", "remote", "set-url", "origin", args.remote],
-                        cwd=str(sync_dir),
-                        capture_output=True,
-                    )
-                    print(f"  Updated remote: {old_remote} -> {args.remote}")
+    if backend_type == "s3":
+        bucket = getattr(args, "bucket", None)
+        if not bucket:
+            print("Error: --bucket is required for S3 backend.", file=sys.stderr)
+            print("  cursaves init --backend s3 --bucket my-cursor-saves", file=sys.stderr)
+            sys.exit(1)
+
+        snapshots_dir.mkdir(parents=True, exist_ok=True)
+
+        config = load_config()
+        config["backend"] = "s3"
+        config.setdefault("s3", {})
+        config["s3"]["bucket"] = bucket
+        if getattr(args, "prefix", None):
+            config["s3"]["prefix"] = args.prefix
+        if getattr(args, "region", None):
+            config["s3"]["region"] = args.region
+        save_config(config)
+
+        backend = S3Backend(
+            bucket=bucket,
+            prefix=config["s3"].get("prefix", "snapshots/"),
+            region=config["s3"].get("region"),
+        )
+
+        print(f"Configured S3 backend:")
+        print(f"  Bucket: {bucket}")
+        print(f"  Prefix: {config['s3'].get('prefix', 'snapshots/')}")
+        if config["s3"].get("region"):
+            print(f"  Region: {config['s3']['region']}")
+        print(f"  Snapshots: {snapshots_dir}")
+
+        # Verify access
+        try:
+            if backend.is_initialized():
+                print(f"\n  Bucket access verified.")
             else:
-                subprocess.run(
-                    ["git", "remote", "add", "origin", args.remote],
-                    cwd=str(sync_dir),
-                    capture_output=True,
-                )
-                print(f"  Added remote: {args.remote}")
+                print(f"\n  Warning: Could not access bucket '{bucket}'.", file=sys.stderr)
+                print(f"  Check your AWS credentials and bucket permissions.", file=sys.stderr)
+        except Exception as e:
+            print(f"\n  Warning: Could not verify bucket access: {e}", file=sys.stderr)
+
+        print(f"\nDone. Run 'cursaves sync' to synchronize conversations.")
+        return
+
+    # Git backend (default / backward-compatible)
+    if paths.is_sync_repo_initialized():
+        config = load_config()
+        if config.get("backend") == "s3":
+            print(f"Currently configured with S3 backend (bucket: {config.get('s3', {}).get('bucket')})")
+            if args.remote:
+                print("Switching to git backend...")
+                config["backend"] = "git"
+                save_config(config)
+            else:
+                return
+
+        git_backend = GitBackend(sync_dir)
+        print(f"Sync repo already initialized at {sync_dir}")
+        if args.remote:
+            git_backend.update_remote(args.remote)
+            print(f"  Remote updated: {args.remote}")
         return
 
     print(f"Initializing sync repo at {sync_dir}...")
-    sync_dir.mkdir(parents=True, exist_ok=True)
-    snapshots_dir.mkdir(exist_ok=True)
-
-    # git init with main as default branch
-    subprocess.run(
-        ["git", "init", "-b", "main"],
-        cwd=str(sync_dir),
-        capture_output=True,
-    )
-
-    # Create .gitignore
-    gitignore = sync_dir / ".gitignore"
-    gitignore.write_text(".DS_Store\n")
-
-    # Initial commit
-    subprocess.run(["git", "add", "."], cwd=str(sync_dir), capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "Initialize cursaves sync repo"],
-        cwd=str(sync_dir),
-        capture_output=True,
-    )
-
+    git_backend = GitBackend(sync_dir)
+    git_backend.init_repo(remote=args.remote)
     print(f"  Created {sync_dir}")
 
-    # Add remote if provided
     if args.remote:
-        subprocess.run(
-            ["git", "remote", "add", "origin", args.remote],
-            cwd=str(sync_dir),
-            capture_output=True,
-        )
         print(f"  Added remote: {args.remote}")
         print(f"\nDone. Run 'cursaves push' from any project directory to start syncing.")
     else:
         print(f"\nDone. To sync between machines, add a remote:")
         print(f"  cursaves init --remote git@github.com:you/my-cursaves.git")
+        print(f"  cursaves init --backend s3 --bucket my-cursor-saves")
 
 
 def cmd_list(args):
@@ -578,13 +531,17 @@ def cmd_reload(args):
 
 
 def _require_sync_repo():
-    """Check that the sync repo is initialized, exit with help if not."""
+    """Check that the sync repo is initialized, exit with help if not.
+
+    Returns the sync directory path (for backward compat with existing callers).
+    """
     if not paths.is_sync_repo_initialized():
         print(
             "Error: Sync repo not initialized.\n"
             "Run 'cursaves init' first to set up ~/.cursaves/\n\n"
-            "Example:\n"
-            "  cursaves init --remote git@github.com:you/my-cursaves.git",
+            "Examples:\n"
+            "  cursaves init --remote git@github.com:you/my-cursaves.git\n"
+            "  cursaves init --backend s3 --bucket my-cursor-saves",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -774,12 +731,11 @@ def _find_ahead_conversations() -> list[dict]:
     return ahead_items
 
 
-def _export_and_push(sync_dir: Path, items: list[dict]) -> int:
-    """Export a list of ahead conversation items, git commit, and push.
+def _export_and_push(sync_dir: Path, items: list[dict], backend: Optional[SyncBackend] = None) -> int:
+    """Export a list of ahead conversation items and push via the backend.
 
     Returns the number of conversations successfully exported.
     """
-    from .watch import _git_has_remote
     from collections import defaultdict
 
     by_workspace: dict[tuple, list[dict]] = defaultdict(list)
@@ -803,54 +759,38 @@ def _export_and_push(sync_dir: Path, items: list[dict]) -> int:
     if total_saved == 0:
         return 0
 
-    subprocess.run(["git", "add", "snapshots/"], cwd=str(sync_dir), capture_output=True)
-    result = subprocess.run(
-        ["git", "diff", "--cached", "--quiet"],
-        cwd=str(sync_dir),
-        capture_output=True,
-    )
-    if result.returncode == 0:
-        return total_saved
+    if backend is None:
+        backend = get_backend()
 
-    hostname = paths.get_machine_id()
-    msg = f"[{hostname}] push {total_saved} ahead conversation(s)"
-    subprocess.run(["git", "commit", "-m", msg], cwd=str(sync_dir), capture_output=True)
-
-    if _git_has_remote(sync_dir):
+    snapshots_dir = paths.get_snapshots_dir()
+    if backend.has_remote():
         print("  Pushing...", end="", flush=True)
-        try:
-            push_result = subprocess.run(
-                ["git", "push", "-u", "origin", "main"],
-                cwd=str(sync_dir),
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            if push_result.returncode == 0:
-                print(" done")
-            else:
-                print(f" failed: {push_result.stderr.strip()}", file=sys.stderr)
-        except subprocess.TimeoutExpired:
-            print(" timed out (changes saved locally)", file=sys.stderr)
+        if backend.push(snapshots_dir):
+            print(" done")
+        else:
+            print(" failed", file=sys.stderr)
 
     return total_saved
 
 
-def _push_ahead(sync_dir: Path, auto: bool = False) -> int:
+def _push_ahead(sync_dir: Path, auto: bool = False, backend: Optional[SyncBackend] = None) -> int:
     """Find conversations ahead of snapshots and push them.
 
     Args:
         sync_dir: The sync repo directory.
         auto: If True, skip prompts and push all ahead conversations.
+        backend: Sync backend to use for push. Auto-detected if None.
 
     Returns the number of conversations pushed.
     """
-    from .watch import _git_has_remote
+    if backend is None:
+        backend = get_backend()
 
     if not auto:
-        if _git_has_remote(sync_dir):
+        if backend.has_remote():
+            snapshots_dir = paths.get_snapshots_dir()
             print("Syncing with remote...", end="", flush=True)
-            if _git_reset_to_origin(sync_dir):
+            if backend.pull(snapshots_dir):
                 print(" done")
             else:
                 print(" failed (continuing with local state)", file=sys.stderr)
@@ -869,7 +809,7 @@ def _push_ahead(sync_dir: Path, auto: bool = False) -> int:
             if len(name) > 40:
                 name = name[:37] + "..."
             print(f"    {name} [{item['workspace_label']}]")
-        total = _export_and_push(sync_dir, ahead_items)
+        total = _export_and_push(sync_dir, ahead_items, backend=backend)
         return total
 
     print(f"\n  {len(ahead_items)} conversation(s) ahead of snapshots:\n")
@@ -901,7 +841,7 @@ def _push_ahead(sync_dir: Path, auto: bool = False) -> int:
         return 0
 
     selected = [ahead_items[i - 1] for i in indices]
-    total = _export_and_push(sync_dir, selected)
+    total = _export_and_push(sync_dir, selected, backend=backend)
 
     if total == 0:
         print("No conversations exported.")
@@ -1080,18 +1020,19 @@ def cmd_repair(args):
 def cmd_sync(args):
     """Pull behind conversations then push ahead ones — fully automatic."""
     sync_dir = _require_sync_repo()
-    from .watch import _git_has_remote
+    backend = get_backend()
+    snapshots_dir = paths.get_snapshots_dir()
 
-    # Step 1: Sync with remote
-    if _git_has_remote(sync_dir):
+    # Step 1: Pull remote → local snapshots
+    if backend.has_remote():
         print("Syncing with remote...", end="", flush=True)
-        if _git_reset_to_origin(sync_dir):
+        if backend.pull(snapshots_dir):
             print(" done")
         else:
             print(" failed", file=sys.stderr)
             return
 
-    # Step 2: Pull — import snapshots where local is behind
+    # Step 2: Import — pull behind conversations from snapshots into Cursor DBs
     print("\n── Pull ──")
     imported = _pull_behind(sync_dir)
     if imported > 0:
@@ -1099,9 +1040,9 @@ def cmd_sync(args):
     else:
         print("  Everything up to date")
 
-    # Step 3: Push — export conversations where local is ahead
+    # Step 3: Push — export ahead conversations from Cursor DBs into snapshots
     print("\n── Push ──")
-    pushed = _push_ahead(sync_dir, auto=True)
+    pushed = _push_ahead(sync_dir, auto=True, backend=backend)
     if pushed == 0:
         print("  Nothing to push")
 
@@ -1121,18 +1062,18 @@ def cmd_sync(args):
 
 
 def cmd_push(args):
-    """Checkpoint + git commit + push in one command."""
-    from .watch import _git_has_remote
-
+    """Checkpoint + push in one command."""
     sync_dir = _require_sync_repo()
+    backend = get_backend()
+    snapshots_dir = paths.get_snapshots_dir()
 
     if getattr(args, "ahead", False):
-        _push_ahead(sync_dir)
+        _push_ahead(sync_dir, backend=backend)
         return
 
-    # Step 0: Reset to origin (remote is ground truth)
-    if _git_has_remote(sync_dir):
-        if not _git_reset_to_origin(sync_dir):
+    # Step 0: Pull latest from remote
+    if backend.has_remote():
+        if not backend.pull(snapshots_dir):
             print("Warning: Could not sync with remote, continuing anyway...", file=sys.stderr)
 
     # Resolve workspace and select conversations
@@ -1170,43 +1111,13 @@ def cmd_push(args):
 
     print(f"  {len(saved)} conversation(s) checkpointed")
 
-    # Step 2: Git add + commit + push
-    subprocess.run(["git", "add", "snapshots/"], cwd=str(sync_dir), capture_output=True)
-
-    # Check if there's anything to commit
-    result = subprocess.run(
-        ["git", "diff", "--cached", "--quiet"],
-        cwd=str(sync_dir),
-        capture_output=True,
-    )
-    if result.returncode == 0:
-        print("  No changes to commit (snapshots already up to date)")
-        return
-
-    # Commit
-    hostname = paths.get_machine_id()
-    project_name = os.path.basename(os.path.normpath(project_path))
-    msg = f"[{hostname}] checkpoint {project_name}"
-    subprocess.run(["git", "commit", "-m", msg], cwd=str(sync_dir), capture_output=True)
-    print(f"  Committed")
-
-    # Push
-    if _git_has_remote(sync_dir):
+    # Step 2: Push to remote
+    if backend.has_remote():
         print("  Pushing...", end="", flush=True)
-        try:
-            push_result = subprocess.run(
-                ["git", "push", "-u", "origin", "main"],
-                cwd=str(sync_dir),
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            if push_result.returncode == 0:
-                print(" done")
-            else:
-                print(f" failed: {push_result.stderr.strip()}", file=sys.stderr)
-        except subprocess.TimeoutExpired:
-            print(" timed out (changes saved locally, push manually with: cd ~/.cursaves && git push)", file=sys.stderr)
+        if backend.push(snapshots_dir):
+            print(" done")
+        else:
+            print(" failed", file=sys.stderr)
     else:
         print("  No remote configured, skipping push")
 
@@ -1214,57 +1125,32 @@ def cmd_push(args):
 
 
 def _git_pull_quiet(sync_dir: Path) -> bool:
-    """Reset to origin without printing status. Returns True on success."""
-    return _git_reset_to_origin(sync_dir)
+    """Pull from remote without printing status. Returns True on success."""
+    backend = get_backend()
+    snapshots_dir = paths.get_snapshots_dir()
+    return backend.pull(snapshots_dir)
 
 
-def _git_commit_and_push(sync_dir: Path, message: str) -> bool:
-    """Add all changes, commit, and push. Returns True if changes were pushed."""
-    from .watch import _git_has_remote
-
-    # Stage all changes (including deletions)
-    subprocess.run(["git", "add", "-A"], cwd=str(sync_dir), capture_output=True)
-
-    # Check if there's anything to commit
-    result = subprocess.run(
-        ["git", "diff", "--cached", "--quiet"],
-        cwd=str(sync_dir),
-        capture_output=True,
-    )
-    if result.returncode == 0:
-        return False  # Nothing to commit
-
-    # Commit
-    subprocess.run(["git", "commit", "-m", message], cwd=str(sync_dir), capture_output=True)
-
-    # Push if remote exists
-    if _git_has_remote(sync_dir):
-        try:
-            push_result = subprocess.run(
-                ["git", "push", "-u", "origin", "main"],
-                cwd=str(sync_dir),
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            return push_result.returncode == 0
-        except subprocess.TimeoutExpired:
-            print("Push timed out (changes saved locally)", file=sys.stderr)
-            return False
-
+def _commit_and_push(sync_dir: Path, message: str) -> bool:
+    """Push snapshot changes to the remote backend. Returns True on success."""
+    backend = get_backend()
+    snapshots_dir = paths.get_snapshots_dir()
+    if backend.has_remote():
+        return backend.push(snapshots_dir)
     return True
 
 
-def _git_pull(sync_dir: Path) -> bool:
-    """Reset to origin/main. Remote is ground truth. Returns True on success."""
-    from .watch import _git_has_remote
+def _backend_pull() -> bool:
+    """Pull latest snapshots from the configured backend."""
+    backend = get_backend()
+    snapshots_dir = paths.get_snapshots_dir()
 
-    if not _git_has_remote(sync_dir):
-        print("No git remote configured, importing from local snapshots only.")
+    if not backend.has_remote():
+        print("No remote configured, importing from local snapshots only.")
         return True
 
     print("Syncing with remote...", end="", flush=True)
-    if _git_reset_to_origin(sync_dir):
+    if backend.pull(snapshots_dir):
         print(" done")
         return True
     else:
@@ -1273,11 +1159,11 @@ def _git_pull(sync_dir: Path) -> bool:
 
 
 def cmd_pull(args):
-    """Git pull + import snapshots in one command."""
+    """Pull + import snapshots in one command."""
     sync_dir = _require_sync_repo()
 
-    # Step 1: Git pull
-    if not _git_pull(sync_dir):
+    # Step 1: Pull from remote
+    if not _backend_pull():
         return
 
     # Step 2: Select what to import
@@ -1560,14 +1446,13 @@ def cmd_status(args):
 def cmd_delete(args):
     """Delete cached snapshots and sync to remote."""
     import shutil
-    from .watch import _git_has_remote
 
     sync_dir = paths.get_sync_dir()
     snapshots_base = paths.get_snapshots_dir()
+    backend = get_backend()
 
-    # Reset to origin (remote is ground truth)
-    if sync_dir.exists() and _git_has_remote(sync_dir):
-        _git_reset_to_origin(sync_dir)
+    if backend.has_remote():
+        backend.pull(snapshots_base)
 
     deleted_any = False
 
@@ -1599,10 +1484,9 @@ def cmd_delete(args):
         print(f"\nDeleted {total_count} snapshot(s) across {len(projects)} project(s).")
 
         # Sync deletion to remote
-        if sync_dir.exists() and _git_has_remote(sync_dir):
-            hostname = paths.get_machine_id()
-            if _git_commit_and_push(sync_dir, f"[{hostname}] delete all snapshots"):
-                print("Synced to remote.")
+        hostname = paths.get_machine_id()
+        if _commit_and_push(sync_dir, f"[{hostname}] delete all snapshots"):
+            print("Synced to remote.")
         return
 
     # --select: interactive selection across projects
@@ -1649,13 +1533,12 @@ def cmd_delete(args):
         print(f"\nDeleted {total_deleted} snapshot(s) across {len(indices)} project(s).")
 
         # Sync deletion to remote
-        if sync_dir.exists() and _git_has_remote(sync_dir):
-            hostname = paths.get_machine_id()
-            msg = f"[{hostname}] delete {', '.join(deleted_names[:3])}"
-            if len(deleted_names) > 3:
-                msg += f" +{len(deleted_names) - 3} more"
-            if _git_commit_and_push(sync_dir, msg):
-                print("Synced to remote.")
+        hostname = paths.get_machine_id()
+        msg = f"[{hostname}] delete {', '.join(deleted_names[:3])}"
+        if len(deleted_names) > 3:
+            msg += f" +{len(deleted_names) - 3} more"
+        if _commit_and_push(sync_dir, msg):
+            print("Synced to remote.")
         return
 
     # Single project mode (original behavior)
@@ -1691,10 +1574,9 @@ def cmd_delete(args):
         print(f"Deleted {count} snapshot(s).")
 
         # Sync deletion to remote
-        if sync_dir.exists() and _git_has_remote(sync_dir):
-            hostname = paths.get_machine_id()
-            if _git_commit_and_push(sync_dir, f"[{hostname}] delete all from {project_id}"):
-                print("Synced to remote.")
+        hostname = paths.get_machine_id()
+        if _commit_and_push(sync_dir, f"[{hostname}] delete all from {project_id}"):
+            print("Synced to remote.")
         return
 
     if args.id:
@@ -1716,10 +1598,9 @@ def cmd_delete(args):
         print(f"Deleted {_get_snapshot_id(match)}")
 
         # Sync deletion to remote
-        if sync_dir.exists() and _git_has_remote(sync_dir):
-            hostname = paths.get_machine_id()
-            if _git_commit_and_push(sync_dir, f"[{hostname}] delete {_get_snapshot_id(match)[:12]}"):
-                print("Synced to remote.")
+        hostname = paths.get_machine_id()
+        if _commit_and_push(sync_dir, f"[{hostname}] delete {_get_snapshot_id(match)[:12]}"):
+            print("Synced to remote.")
         return
 
     # Interactive mode: list and select snapshots for current project
@@ -1759,10 +1640,9 @@ def cmd_delete(args):
     print(f"\nDeleted {len(indices)} snapshot(s).")
 
     # Sync deletion to remote
-    if sync_dir.exists() and _git_has_remote(sync_dir):
-        hostname = paths.get_machine_id()
-        if _git_commit_and_push(sync_dir, f"[{hostname}] delete {len(indices)} from {project_id}"):
-            print("Synced to remote.")
+    hostname = paths.get_machine_id()
+    if _commit_and_push(sync_dir, f"[{hostname}] delete {len(indices)} from {project_id}"):
+        print("Synced to remote.")
 
 
 def main():
@@ -1786,11 +1666,28 @@ def main():
 
     # ── init ────────────────────────────────────────────────────────
     p_init = subparsers.add_parser(
-        "init", help="Initialize ~/.cursaves/ sync repo"
+        "init", help="Initialize sync (git repo, S3 bucket, etc.)"
     )
     p_init.add_argument(
         "--remote", "-r",
-        help="Git remote URL for syncing (e.g., git@github.com:you/my-saves.git)",
+        help="Git remote URL (e.g., git@github.com:you/my-saves.git)",
+    )
+    p_init.add_argument(
+        "--backend", "-b",
+        choices=["git", "s3"],
+        help="Sync backend to use (default: git)",
+    )
+    p_init.add_argument(
+        "--bucket",
+        help="S3 bucket name (required for --backend s3)",
+    )
+    p_init.add_argument(
+        "--prefix",
+        help="S3 key prefix (default: snapshots/)",
+    )
+    p_init.add_argument(
+        "--region",
+        help="AWS region for S3 bucket",
     )
     p_init.set_defaults(func=cmd_init)
 

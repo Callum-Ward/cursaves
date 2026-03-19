@@ -301,9 +301,20 @@ def get_snapshots_dir() -> Path:
 
 
 def is_sync_repo_initialized() -> bool:
-    """Check if the sync directory is a git repo."""
+    """Check if a sync backend has been configured (git repo or cloud)."""
     sync_dir = get_sync_dir()
-    return (sync_dir / ".git").exists()
+    if (sync_dir / ".git").exists():
+        return True
+    # Check for non-git backend config
+    config_path = Path.home() / ".config" / "cursaves" / "config.json"
+    if config_path.exists():
+        try:
+            import json
+            cfg = json.loads(config_path.read_text())
+            return cfg.get("backend") in ("s3", "azure")
+        except Exception:
+            pass
+    return False
 
 
 def get_machine_id() -> str:

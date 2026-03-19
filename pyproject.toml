@@ -5,11 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "cursaves"
 version = "0.6.0"
-description = "Sync Cursor agent chat sessions between machines via git"
+description = "Sync Cursor agent chat sessions between machines"
 readme = "README.md"
 license = "AGPL-3.0-only"
 requires-python = ">=3.10"
 dependencies = []
+
+[project.optional-dependencies]
+s3 = ["boto3"]
 
 [project.scripts]
 cursaves = "cursor_saves.cli:main"
