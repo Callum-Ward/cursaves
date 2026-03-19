@@ -648,10 +648,13 @@ def list_snapshot_projects(snapshots_dir: Optional[Path] = None) -> list[dict]:
 def find_snapshot_dir_for_project(
     target_project_path: str,
     snapshots_dir: Optional[Path] = None,
+    alias: Optional[str] = None,
 ) -> Optional[Path]:
     """Find the snapshot directory matching a project path.
 
-    Tries in order:
+    If alias is given, looks up snapshots/<alias>/ directly (fast-path).
+
+    Otherwise tries in order:
     1. Exact match by project identifier (git remote URL based)
     2. Basename match (for SSH workspaces where git -C fails locally)
     3. Scan snapshot metadata for matching sourceProjectPath basenames
@@ -660,6 +663,13 @@ def find_snapshot_dir_for_project(
     """
     if snapshots_dir is None:
         snapshots_dir = paths.get_snapshots_dir()
+
+    # Alias fast-path: go directly to the named directory
+    if alias:
+        alias_dir = snapshots_dir / alias
+        if alias_dir.exists() and list_snapshot_files(alias_dir):
+            return alias_dir
+        return None
 
     # 1. Exact match by project identifier
     project_id = paths.get_project_identifier(target_project_path)
@@ -759,6 +769,7 @@ def import_all_snapshots(
     snapshots_dir: Optional[Path] = None,
     force: bool = False,
     target_workspace_dir: Optional[Path] = None,
+    alias: Optional[str] = None,
 ) -> tuple[int, int]:
     """Import all snapshots for a project.
 
@@ -767,6 +778,7 @@ def import_all_snapshots(
         snapshots_dir: Directory containing snapshot subdirectories.
         force: Suppress Cursor-running warning.
         target_workspace_dir: Optional workspace directory to import into.
+        alias: If given, import from snapshots/<alias>/ directly.
 
     Returns (success_count, failure_count).
     """
@@ -784,15 +796,15 @@ def import_all_snapshots(
     if snapshots_dir is None:
         snapshots_dir = paths.get_snapshots_dir()
 
-    project_snapshots = find_snapshot_dir_for_project(target_project_path, snapshots_dir)
+    project_snapshots = find_snapshot_dir_for_project(target_project_path, snapshots_dir, alias=alias)
 
     if not project_snapshots:
-        project_id = paths.get_project_identifier(target_project_path)
-        print(f"No snapshots found for project '{project_id}'", file=sys.stderr)
+        label = alias if alias else paths.get_project_identifier(target_project_path)
+        print(f"No snapshots found for project '{label}'", file=sys.stderr)
         print(f"Run 'cursaves snapshots' to see available snapshot projects.", file=sys.stderr)
         return 0, 0
 
-    project_id = paths.get_project_identifier(target_project_path)
+    project_id = alias if alias else paths.get_project_identifier(target_project_path)
     if project_snapshots.name != project_id:
         print(
             f"Note: Matched snapshots at {project_snapshots.name}/ "

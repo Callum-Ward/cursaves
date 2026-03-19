@@ -114,7 +114,7 @@ def find_workspace_dirs_for_project(project_path: str) -> list[Path]:
             folder_uri = data.get("folder", "")
             # Handle file:// URIs
             if folder_uri.startswith("file://"):
-                folder_path = folder_uri[len("file://"):]
+                folder_path = folder_uri[len("file://") :]
                 # URL-decode common escapes
                 folder_path = folder_path.replace("%20", " ")
             elif folder_uri.startswith("vscode-remote://"):
@@ -162,9 +162,9 @@ def list_all_workspaces() -> list[dict]:
 
     Returns a list of dicts with:
       - folder_uri: raw URI from workspace.json
-      - path: extracted filesystem path
-      - type: 'local' or 'ssh'
-      - host: SSH hostname (for ssh type, None for local)
+      - path: extracted filesystem path (for workspace, path to the .code-workspace file)
+      - type: 'local', 'ssh', or 'workspace'
+      - host: SSH hostname (for ssh type, None otherwise)
       - workspace_dir: Path to the workspace directory
       - mtime: modification time of the workspace DB
     """
@@ -181,35 +181,48 @@ def list_all_workspaces() -> list[dict]:
             continue
         try:
             data = json.loads(ws_json.read_text())
-            folder_uri = data.get("folder", "")
-            if not folder_uri:
-                continue
 
             ws_type = "local"
             host = None
             folder_path = ""
+            folder_uri = ""
 
-            if folder_uri.startswith("file://"):
-                folder_path = folder_uri[len("file://"):]
-                folder_path = folder_path.replace("%20", " ")
-            elif folder_uri.startswith("vscode-remote://"):
-                ws_type = "ssh"
-                # Format: vscode-remote://ssh-remote%2B<host>/<path>
-                authority = folder_uri.split("/")[2]  # ssh-remote%2B<host>
-                if "%2B" in authority:
-                    host = authority.split("%2B", 1)[1]
-                elif "+" in authority:
-                    host = authority.split("+", 1)[1]
-                # Decode the host if it's hex-encoded JSON (e.g. {"hostName":"core"})
-                if host:
-                    host = _decode_ssh_host(host)
-                parts = folder_uri.split("/", 3)
-                if len(parts) >= 4:
-                    folder_path = "/" + parts[3]
+            # workspace .code-workspace: uses "workspace" key instead of "folder"
+            if "workspace" in data and not data.get("folder"):
+                ws_uri = data["workspace"]
+                if ws_uri.startswith("file://"):
+                    folder_uri = ws_uri
+                    folder_path = ws_uri[len("file://") :]
+                    folder_path = folder_path.replace("%20", " ")
+                    ws_type = "workspace"
                 else:
                     continue
             else:
-                continue
+                folder_uri = data.get("folder", "")
+                if not folder_uri:
+                    continue
+
+                if folder_uri.startswith("file://"):
+                    folder_path = folder_uri[len("file://") :]
+                    folder_path = folder_path.replace("%20", " ")
+                elif folder_uri.startswith("vscode-remote://"):
+                    ws_type = "ssh"
+                    # Format: vscode-remote://ssh-remote%2B<host>/<path>
+                    authority = folder_uri.split("/")[2]  # ssh-remote%2B<host>
+                    if "%2B" in authority:
+                        host = authority.split("%2B", 1)[1]
+                    elif "+" in authority:
+                        host = authority.split("+", 1)[1]
+                    # Decode the host if it's hex-encoded JSON (e.g. {"hostName":"core"})
+                    if host:
+                        host = _decode_ssh_host(host)
+                    parts = folder_uri.split("/", 3)
+                    if len(parts) >= 4:
+                        folder_path = "/" + parts[3]
+                    else:
+                        continue
+                else:
+                    continue
 
             # Get DB modification time
             db_path = ws_dir / "state.vscdb"
@@ -262,20 +275,33 @@ def resolve_workspace(selector: str) -> Optional[dict]:
 
     The selector can be:
       - A number (1-based index from list_workspaces_with_conversations)
+      - A workspace hash (directory name under workspaceStorage/)
       - A path substring (matched against workspace paths)
     """
     workspaces = list_workspaces_with_conversations()
-    if not workspaces:
-        return None
 
     # Try as index
     try:
         idx = int(selector)
-        if 1 <= idx <= len(workspaces):
+        if workspaces and 1 <= idx <= len(workspaces):
             return workspaces[idx - 1]
         return None
     except ValueError:
         pass
+
+    # Try as workspace hash (exact match, or prefix match when selector is 8 chars (short hash))
+    # Allow the short hash because that's what's displayed in the workspaces list,
+    # so user can just copy-paste the short hash, e.g. `cursaves push -w 497e8ab0`
+    for ws in workspaces:
+        name = ws["workspace_dir"].name
+        if len(selector) == 8:
+            # Short hash match (8 chars) - allow prefix match
+            if name.startswith(selector):
+                return ws
+        else:
+            # Exact match
+            if name == selector:
+                return ws
 
     # Try as path substring
     for ws in workspaces:
@@ -300,6 +326,31 @@ def get_snapshots_dir() -> Path:
     return snapshots
 
 
+def get_aliases_path() -> Path:
+    """Return the path to the git-tracked aliases file (~/.cursaves/aliases.json)."""
+    return get_sync_dir() / "aliases.json"
+
+
+def load_aliases() -> dict:
+    """Load project aliases from ~/.cursaves/aliases.json.
+
+    Returns a dict mapping alias name → { "projectIdentifier": str, "createdAt": str }.
+    """
+    p = get_aliases_path()
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def save_aliases(aliases: dict) -> None:
+    """Persist aliases to ~/.cursaves/aliases.json."""
+    p = get_aliases_path()
+    p.write_text(json.dumps(aliases, indent=2))
+
+
 def is_sync_repo_initialized() -> bool:
     """Check if the sync directory is a git repo."""
     sync_dir = get_sync_dir()
@@ -309,6 +360,7 @@ def is_sync_repo_initialized() -> bool:
 def get_machine_id() -> str:
     """Return a human-readable machine identifier."""
     import socket
+
     return socket.gethostname()
 
 
@@ -348,7 +400,8 @@ def find_all_matching_workspaces(source_path: str) -> list[dict]:
 def format_workspace_display(ws: dict, include_path: bool = True) -> str:
     """Format a workspace dict for display.
 
-    Returns a string like "ssh core /mnt/home/.../project" or "(local) /home/.../project"
+    Returns a string like "ssh core /mnt/home/.../project", "(local) /home/.../project",
+    or "(workspace) /home/.../my-proj.code-workspace"
     """
     if ws["type"] == "ssh":
         host = ws.get("host") or "unknown"
@@ -358,6 +411,13 @@ def format_workspace_display(ws: dict, include_path: bool = True) -> str:
                 path = "..." + path[-37:]
             return f"ssh {host} {path}"
         return f"ssh {host}"
+    elif ws["type"] == "workspace":
+        if include_path:
+            path = ws["path"]
+            if len(path) > 45:
+                path = "..." + path[-42:]
+            return f"(workspace) {path}"
+        return "(workspace)"
     else:
         if include_path:
             path = ws["path"]
@@ -370,16 +430,20 @@ def format_workspace_display(ws: dict, include_path: bool = True) -> str:
 # ── Project identification ────────────────────────────────────────────
 
 
-def get_project_identifier(project_path: str) -> str:
+def get_project_identifier(project_path: str, alias: Optional[str] = None) -> str:
     """Get a stable identifier for a project, used as the snapshot subdirectory.
 
-    Uses the git remote origin URL if available (normalized to a filesystem-safe
-    string).  Falls back to the directory basename for non-git projects.
+    If alias is given, it is used directly as the identifier (overrides auto-detection).
+
+    Otherwise uses the git remote origin URL if available (normalized to a
+    filesystem-safe string), falling back to the directory basename.
 
     This means:
       - Same repo under different local names (bob/ vs alice/) → same identifier
       - Different repos that happen to share a name → different identifiers
     """
+    if alias:
+        return alias
     remote_url = _get_git_remote_url(project_path)
     if remote_url:
         return _normalize_remote_url(remote_url)

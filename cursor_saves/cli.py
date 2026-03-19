@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__, db, export, paths
@@ -229,34 +230,33 @@ def _workspace_sync_summary(ws: dict, _global_cdb: "Optional[db.CursorDB]" = Non
 
 def cmd_workspaces(args):
     """List Cursor workspaces that have conversations."""
-    from datetime import datetime, timezone
-
     workspaces = paths.list_workspaces_with_conversations()
     if not workspaces:
         print("No workspaces with conversations found.")
         return
 
-    print(f"{'#':<4} {'Type':<6} {'Path':<40} {'Host':<12} {'Chats':>5}  {'Sync Status'}")
-    print("-" * 105)
+    print(f"{'#':<4} {'Type':<10} {'Path':<38} {'Host':<12} {'Chats':>5}  {'Hash':<9}  {'Sync Status'}")
+    print("-" * 115)
 
     global_db_path = paths.get_global_db_path()
     global_cdb = db.CursorDB(global_db_path) if global_db_path.exists() else None
     try:
         for i, ws in enumerate(workspaces, 1):
             path = ws["path"]
-            if len(path) > 38:
-                path = "..." + path[-35:]
+            if len(path) > 36:
+                path = "..." + path[-33:]
             host = ws["host"] or ""
             convos = ws.get("conversations", 0)
             sync = _workspace_sync_summary(ws, _global_cdb=global_cdb)
+            ws_hash = ws["workspace_dir"].name[:8]
 
-            print(f"{i:<4} {ws['type']:<6} {path:<40} {host:<12} {convos:>5}  {sync}")
+            print(f"{i:<4} {ws['type']:<10} {path:<38} {host:<12} {convos:>5}  {ws_hash}  {sync}")
     finally:
         if global_cdb:
             global_cdb.close()
 
     print(f"\n{len(workspaces)} workspace(s) with conversations")
-    print("\nUse 'cursaves push -w <number>' to push a specific workspace.")
+    print("\nUse 'cursaves push -w <number or hash>' to push a specific workspace.")
 
 
 def _is_remote_path(path: str, source_machine: str) -> bool:
@@ -803,7 +803,7 @@ def _export_and_push(sync_dir: Path, items: list[dict]) -> int:
     if total_saved == 0:
         return 0
 
-    subprocess.run(["git", "add", "snapshots/"], cwd=str(sync_dir), capture_output=True)
+    subprocess.run(["git", "add", "-A", "snapshots/"], cwd=str(sync_dir), capture_output=True)
     result = subprocess.run(
         ["git", "diff", "--cached", "--quiet"],
         cwd=str(sync_dir),
@@ -1120,6 +1120,24 @@ def cmd_sync(args):
         print("Already in sync.")
 
 
+def _register_alias(alias: str, project_path: str, sync_dir: Path) -> None:
+    """Record alias → projectIdentifier in aliases.json and stage for commit.
+
+    Saves the original auto-derived project identifier so the mapping is
+    auditable, but the alias itself is the authoritative snapshot directory name.
+    """
+    aliases = paths.load_aliases()
+    original_id = paths.get_project_identifier(project_path)
+    if aliases.get(alias, {}).get("projectIdentifier") != original_id:
+        aliases[alias] = {
+            "projectIdentifier": original_id,
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+        }
+        paths.save_aliases(aliases)
+        subprocess.run(["git", "add", "aliases.json"], cwd=str(sync_dir), capture_output=True)
+        print(f"  Alias '{alias}' → snapshots/{alias}/")
+
+
 def cmd_push(args):
     """Checkpoint + git commit + push in one command."""
     from .watch import _git_has_remote
@@ -1129,6 +1147,8 @@ def cmd_push(args):
     if getattr(args, "ahead", False):
         _push_ahead(sync_dir)
         return
+
+    alias = getattr(args, "alias", None) or None
 
     # Step 0: Reset to origin (remote is ground truth)
     if _git_has_remote(sync_dir):
@@ -1155,13 +1175,16 @@ def cmd_push(args):
             return
 
     # Step 1: Checkpoint
-    if composer_ids:
+    if alias:
+        print(f"\nCheckpointing to snapshots/{alias}/...")
+    elif composer_ids:
         print(f"\nCheckpointing {len(composer_ids)} conversation(s)...")
     else:
         print(f"Checkpointing all conversations for {project_path}...")
     saved = export.checkpoint_project(
         project_path, composer_ids=composer_ids,
         workspace_dir=workspace_dir, source_host=source_host,
+        alias=alias,
     )
 
     if not saved:
@@ -1170,8 +1193,20 @@ def cmd_push(args):
 
     print(f"  {len(saved)} conversation(s) checkpointed")
 
-    # Step 2: Git add + commit + push
-    subprocess.run(["git", "add", "snapshots/"], cwd=str(sync_dir), capture_output=True)
+    # Prune old snapshots: remove any files for conversations not in this push
+    # (so removed convos don't linger in git)
+    project_dir = saved[0].parent
+    kept_ids = {export._composer_id_from_snapshot_path(p) for p in saved}
+    pruned = export.prune_project_snapshots(project_dir, kept_ids)
+    if pruned > 0:
+        print(f"  Pruned {pruned} removed conversation(s) from snapshots")
+
+    # Register alias in aliases.json (staged for the same commit)
+    if alias:
+        _register_alias(alias, project_path, sync_dir)
+
+    # Step 2: Git add + commit + push (-A stages deletions too)
+    subprocess.run(["git", "add", "-A", "snapshots/"], cwd=str(sync_dir), capture_output=True)
 
     # Check if there's anything to commit
     result = subprocess.run(
@@ -1185,8 +1220,8 @@ def cmd_push(args):
 
     # Commit
     hostname = paths.get_machine_id()
-    project_name = os.path.basename(os.path.normpath(project_path))
-    msg = f"[{hostname}] checkpoint {project_name}"
+    snapshot_label = alias if alias else os.path.basename(os.path.normpath(project_path))
+    msg = f"[{hostname}] checkpoint {snapshot_label}"
     subprocess.run(["git", "commit", "-m", msg], cwd=str(sync_dir), capture_output=True)
     print(f"  Committed")
 
@@ -1276,8 +1311,37 @@ def cmd_pull(args):
     """Git pull + import snapshots in one command."""
     sync_dir = _require_sync_repo()
 
+    alias = getattr(args, "alias", None) or None
+
     # Step 1: Git pull
     if not _git_pull(sync_dir):
+        return
+
+    # Alias fast-path: skip all interactive selection and import directly
+    if alias:
+        snapshots_dir = paths.get_snapshots_dir()
+        alias_dir = snapshots_dir / alias
+        if not alias_dir.exists() or not list_snapshot_files(alias_dir):
+            print(f"Error: No snapshots found for alias '{alias}'.", file=sys.stderr)
+            print(f"Run 'cursaves push --alias {alias}' first to create it.", file=sys.stderr)
+            return
+        project_path, workspace_dir = _resolve_workspace_for_import(args)
+        if workspace_dir:
+            print(f"Importing snapshots/{alias}/ into workspace: {project_path}")
+        else:
+            print(f"Importing snapshots/{alias}/ for {project_path}...")
+        success, failure = import_all_snapshots(
+            project_path,
+            force=getattr(args, "force", False),
+            target_workspace_dir=workspace_dir,
+            alias=alias,
+        )
+        if success == 0 and failure == 0:
+            print("No snapshots found to import.")
+            return
+        print(f"\nDone: {success} imported, {failure} failed.")
+        if success > 0:
+            _maybe_reload(args)
         return
 
     # Step 2: Select what to import
@@ -1440,6 +1504,7 @@ def cmd_pull(args):
             project_path,
             force=args.force,
             target_workspace_dir=workspace_dir,
+            alias=alias,
         )
 
         if success == 0 and failure == 0:
@@ -1780,7 +1845,7 @@ def main():
     def add_project_args(p):
         p.add_argument(
             "--workspace", "-w",
-            help="Workspace number from 'cursaves workspaces' (for SSH remotes)",
+            help="Workspace number, hash, or path substring from 'cursaves workspaces'",
         )
         p.add_argument("--project", "-p", help="Project path (default: current directory)")
 
@@ -1857,6 +1922,10 @@ def main():
         "--ahead", "-a", action="store_true",
         help="Find and push all conversations ahead of snapshots across all workspaces",
     )
+    p_push.add_argument(
+        "--alias",
+        help="Store snapshots under snapshots/<alias>/ instead of the auto-derived project name",
+    )
     p_push.set_defaults(func=cmd_push)
 
     # ── pull ────────────────────────────────────────────────────────
@@ -1865,7 +1934,7 @@ def main():
     )
     p_pull.add_argument(
         "--workspace", "-w",
-        help="Target workspace to import into (number from 'cursaves workspaces' or path substring)",
+        help="Target workspace to import into (number, hash, or path substring from 'cursaves workspaces')",
     )
     p_pull.add_argument("--project", "-p", help="Project path (default: current directory)")
     p_pull.add_argument(
@@ -1879,6 +1948,10 @@ def main():
     p_pull.add_argument(
         "--reload", action="store_true",
         help="(deprecated, no effect) Cursor requires a full restart to see imports",
+    )
+    p_pull.add_argument(
+        "--alias",
+        help="Import from snapshots/<alias>/ directly (matches a name set with 'push --alias')",
     )
     p_pull.set_defaults(func=cmd_pull)
 
