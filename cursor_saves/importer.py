@@ -104,16 +104,25 @@ def read_snapshot_meta(snapshot_path: Path) -> dict:
 def is_cursor_running() -> bool:
     """Check if the main Cursor app process is running.
 
-    Uses exact name match to avoid false positives from macOS system
-    services (CursorUIViewService) and lingering crash handlers.
+    On macOS, pgrep -x fails because the comm field is truncated to 16
+    characters. Instead we parse `ps -axo args` and look for the main
+    Cursor executable while excluding helpers, crash handlers, and the
+    macOS CursorUIViewService system process.
     """
     try:
         result = subprocess.run(
-            ["pgrep", "-x", "Cursor"],
+            ["ps", "-axo", "args"],
             capture_output=True,
             text=True,
         )
-        return result.returncode == 0
+        if result.returncode != 0:
+            return False
+        for line in result.stdout.splitlines():
+            if "Cursor.app/Contents/MacOS/Cursor" in line \
+                    and "Helper" not in line \
+                    and "Frameworks" not in line:
+                return True
+        return False
     except FileNotFoundError:
         return False
 

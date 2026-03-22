@@ -29,11 +29,8 @@ def reload_cursor_window() -> bool:
 def _reload_macos() -> bool:
     """Use osascript to send Cmd+Shift+P and type the reload command."""
     try:
-        result = subprocess.run(
-            ["pgrep", "-x", "Cursor"],
-            capture_output=True,
-        )
-        if result.returncode != 0:
+        from .importer import is_cursor_running
+        if not is_cursor_running():
             print("  Cursor is not running, skipping reload.", file=sys.stderr)
             return False
 
