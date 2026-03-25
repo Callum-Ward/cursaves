@@ -173,34 +173,33 @@ def _workspace_sync_summary(ws: dict, _global_cdb: "Optional[db.CursorDB]" = Non
 
 def cmd_workspaces(args):
     """List Cursor workspaces that have conversations."""
-    from datetime import datetime, timezone
-
     workspaces = paths.list_workspaces_with_conversations()
     if not workspaces:
         print("No workspaces with conversations found.")
         return
 
-    print(f"{'#':<4} {'Type':<6} {'Path':<40} {'Host':<12} {'Chats':>5}  {'Sync Status'}")
-    print("-" * 105)
+    print(f"{'#':<4} {'Type':<10} {'Path':<38} {'Host':<12} {'Chats':>5}  {'Hash':<9}  {'Sync Status'}")
+    print("-" * 115)
 
     global_db_path = paths.get_global_db_path()
     global_cdb = db.CursorDB(global_db_path) if global_db_path.exists() else None
     try:
         for i, ws in enumerate(workspaces, 1):
             path = ws["path"]
-            if len(path) > 38:
-                path = "..." + path[-35:]
+            if len(path) > 36:
+                path = "..." + path[-33:]
             host = ws["host"] or ""
             convos = ws.get("conversations", 0)
             sync = _workspace_sync_summary(ws, _global_cdb=global_cdb)
+            ws_hash = ws["workspace_dir"].name[:8]
 
-            print(f"{i:<4} {ws['type']:<6} {path:<40} {host:<12} {convos:>5}  {sync}")
+            print(f"{i:<4} {ws['type']:<10} {path:<38} {host:<12} {convos:>5}  {ws_hash}  {sync}")
     finally:
         if global_cdb:
             global_cdb.close()
 
     print(f"\n{len(workspaces)} workspace(s) with conversations")
-    print("\nUse 'cursaves push -w <number>' to push a specific workspace.")
+    print("\nUse 'cursaves push -w <number or hash>' to push a specific workspace.")
 
 
 def _is_remote_path(path: str, source_machine: str) -> bool:
@@ -1660,7 +1659,7 @@ def main():
     def add_project_args(p):
         p.add_argument(
             "--workspace", "-w",
-            help="Workspace number from 'cursaves workspaces' (for SSH remotes)",
+            help="Workspace number, hash, or path substring from 'cursaves workspaces'",
         )
         p.add_argument("--project", "-p", help="Project path (default: current directory)")
 
@@ -1762,7 +1761,7 @@ def main():
     )
     p_pull.add_argument(
         "--workspace", "-w",
-        help="Target workspace to import into (number from 'cursaves workspaces' or path substring)",
+        help="Target workspace to import into (number, hash, or path substring from 'cursaves workspaces')",
     )
     p_pull.add_argument("--project", "-p", help="Project path (default: current directory)")
     p_pull.add_argument(
