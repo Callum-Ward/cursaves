@@ -264,9 +264,9 @@ def _extract_agent_blob_ids(conv_data: dict) -> set[str]:
     """Extract agentKv blob IDs referenced by a conversation.
 
     The composerData.conversationState field is a base64-encoded protobuf
-    prefixed with '~'. It contains repeated 32-byte blob IDs (protobuf
-    field 1, wire type 2, length 32) which reference agentKv:blob:{hex}
-    entries in cursorDiskKV.
+    prefixed with '~'. It contains 32-byte blob IDs at multiple protobuf
+    field numbers (1, 3, 7, 8, etc.) with wire type 2 (length-delimited).
+    These reference agentKv:blob:{hex} entries in cursorDiskKV.
     """
     import base64
 
@@ -282,7 +282,9 @@ def _extract_agent_blob_ids(conv_data: dict) -> set[str]:
     blob_ids: set[str] = set()
     i = 0
     while i < len(raw) - 33:
-        if raw[i] == 0x0A and raw[i + 1] == 0x20:
+        tag = raw[i]
+        wire_type = tag & 0x07
+        if wire_type == 2 and raw[i + 1] == 0x20:
             blob_ids.add(raw[i + 2 : i + 34].hex())
             i += 34
         else:
