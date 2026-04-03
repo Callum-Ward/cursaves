@@ -127,18 +127,26 @@ def is_cursor_running() -> bool:
         return False
 
 
+_SKIP_REWRITE_KEYS = frozenset({"conversationState"})
+
+
 def rewrite_paths(data: Any, old_prefix: str, new_prefix: str) -> Any:
     """Recursively rewrite absolute paths in conversation data.
 
     Replaces old_prefix with new_prefix in all string values that
-    look like file paths.
+    look like file paths.  Skips binary/encoded fields like
+    ``conversationState`` (base64-encoded protobuf) that should
+    never be modified.
     """
     if isinstance(data, str):
         if old_prefix in data:
             return data.replace(old_prefix, new_prefix)
         return data
     elif isinstance(data, dict):
-        return {k: rewrite_paths(v, old_prefix, new_prefix) for k, v in data.items()}
+        return {
+            k: (v if k in _SKIP_REWRITE_KEYS else rewrite_paths(v, old_prefix, new_prefix))
+            for k, v in data.items()
+        }
     elif isinstance(data, list):
         return [rewrite_paths(item, old_prefix, new_prefix) for item in data]
     else:

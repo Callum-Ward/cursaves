@@ -265,8 +265,11 @@ def _extract_agent_blob_ids(conv_data: dict) -> set[str]:
 
     The composerData.conversationState field is a base64-encoded protobuf
     prefixed with '~'. It contains 32-byte blob IDs at multiple protobuf
-    field numbers (1, 3, 7, 8, etc.) with wire type 2 (length-delimited).
+    field numbers (1, 3, 8, 13, etc.) with wire type 2 (length-delimited).
     These reference agentKv:blob:{hex} entries in cursorDiskKV.
+
+    Uses proper protobuf wire format parsing (varint tags + length
+    prefixes) rather than naive byte scanning to avoid phantom matches.
     """
     import base64
 
@@ -279,16 +282,43 @@ def _extract_agent_blob_ids(conv_data: dict) -> set[str]:
     except Exception:
         return set()
 
+    def _read_varint(data: bytes, offset: int) -> tuple[int, int]:
+        result = 0
+        shift = 0
+        while offset < len(data):
+            b = data[offset]
+            result |= (b & 0x7F) << shift
+            offset += 1
+            if (b & 0x80) == 0:
+                return result, offset
+            shift += 7
+        return result, offset
+
     blob_ids: set[str] = set()
     i = 0
-    while i < len(raw) - 33:
-        tag = raw[i]
+    end = len(raw)
+    while i < end:
+        tag, next_i = _read_varint(raw, i)
         wire_type = tag & 0x07
-        if wire_type == 2 and raw[i + 1] == 0x20:
-            blob_ids.add(raw[i + 2 : i + 34].hex())
-            i += 34
+
+        if wire_type == 2 and next_i < end:
+            length, data_start = _read_varint(raw, next_i)
+            if length == 32 and data_start + 32 <= end:
+                blob_ids.add(raw[data_start : data_start + 32].hex())
+                i = data_start + 32
+            elif length > 0 and data_start + length <= end:
+                i = data_start + length
+            else:
+                i = next_i
+        elif wire_type == 0:
+            _, i = _read_varint(raw, next_i)
+        elif wire_type == 5:
+            i = next_i + 4
+        elif wire_type == 1:
+            i = next_i + 8
         else:
-            i += 1
+            i = next_i if next_i > i else i + 1
+
     return blob_ids
 
 
