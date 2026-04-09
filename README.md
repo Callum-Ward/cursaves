@@ -117,7 +117,7 @@ cadfb263-3326-4aff-8887-dcc12f736b11     Feedback on documentation...   agent   
 
 **Requirements:** Python 3.10+, [uv](https://docs.astral.sh/uv/), macOS or Linux, Git (for git backend). Zero required Python dependencies.
 
-**Tested with:** Cursor 2.6.11
+**Tested with:** Cursor 2.6–3.0 (supports both old and new chat storage formats)
 
 ### Install as a global CLI tool (recommended)
 
@@ -237,8 +237,10 @@ The watch daemon polls for database changes, auto-checkpoints when conversations
 
 Cursor stores conversations in two local SQLite databases, not as files you can easily copy:
 
-- **Workspace DB** (`workspaceStorage/{id}/state.vscdb`): A list of conversation IDs and sidebar metadata for each project. This is what populates the chat list in the sidebar.
-- **Global DB** (`globalStorage/state.vscdb`): The actual conversation content -- one JSON blob per conversation, keyed by `composerData:{UUID}`.
+- **Workspace DB** (`workspaceStorage/{id}/state.vscdb`): Links conversations to a workspace. In Cursor ≤2.6, this contains a complete chat list (`allComposers`). In Cursor 3.0+, the list is removed and Cursor uses internal discovery instead.
+- **Global DB** (`globalStorage/state.vscdb`): The actual conversation content -- one JSON blob per conversation, keyed by `composerData:{UUID}`. This is unchanged across Cursor versions.
+
+> **Cursor 3.0 migration (April 2026):** Cursor 3.0 removes the `allComposers` array from workspace databases. cursaves v0.8.0+ handles both formats transparently. See [docs/how-cursor-stores-chats.md](docs/how-cursor-stores-chats.md) for details.
 
 Data locations:
 

@@ -21,8 +21,9 @@ def get_workspace_conversations(
     If workspace_dir is provided, only reads from that specific workspace
     (avoids cross-host contamination for SSH workspaces with the same path).
 
-    Returns the allComposers array from composer.composerData, enriched
-    with the workspace directory path.
+    Supports both Cursor 2.x (allComposers list) and Cursor 3.0+
+    (selectedComposerIds + composerChatViewPane) schemas. For 3.0+
+    workspaces, builds conversation metadata from the global DB.
     """
     if workspace_dir is not None:
         ws_dirs = [workspace_dir]
@@ -33,6 +34,7 @@ def get_workspace_conversations(
 
     all_conversations = []
     seen_ids = set()
+    ids_needing_global_lookup: list[tuple[str, str]] = []  # (composerId, ws_dir)
 
     for ws_dir in ws_dirs:
         db_path = ws_dir / "state.vscdb"
@@ -44,15 +46,41 @@ def get_workspace_conversations(
             if not data:
                 continue
 
+            # Cursor 2.x: allComposers has full metadata
             composers = data.get("allComposers", [])
-            for c in composers:
-                cid = c.get("composerId")
-                if cid and cid not in seen_ids:
-                    seen_ids.add(cid)
-                    c["_workspaceDir"] = str(ws_dir)
-                    all_conversations.append(c)
+            if composers:
+                for c in composers:
+                    cid = c.get("composerId")
+                    if cid and cid not in seen_ids:
+                        seen_ids.add(cid)
+                        c["_workspaceDir"] = str(ws_dir)
+                        all_conversations.append(c)
+            else:
+                # Cursor 3.0+: gather IDs from available sources
+                ws_ids = paths.get_workspace_composer_ids(db_path)
+                for cid in ws_ids:
+                    if cid not in seen_ids:
+                        seen_ids.add(cid)
+                        ids_needing_global_lookup.append((cid, str(ws_dir)))
 
-    # Sort by creation time, newest first
+    # For Cursor 3.0+ IDs, build metadata from global DB
+    if ids_needing_global_lookup:
+        global_db = paths.get_global_db_path()
+        if global_db.exists():
+            with db.CursorDB(global_db) as cdb:
+                for cid, ws_dir_str in ids_needing_global_lookup:
+                    cd = cdb.get_json(f"composerData:{cid}")
+                    if cd:
+                        all_conversations.append({
+                            "composerId": cid,
+                            "name": cd.get("name", ""),
+                            "createdAt": cd.get("createdAt", 0),
+                            "lastUpdatedAt": cd.get("lastUpdatedAt", 0),
+                            "unifiedMode": cd.get("unifiedMode", "agent"),
+                            "forceMode": cd.get("forceMode", ""),
+                            "_workspaceDir": ws_dir_str,
+                        })
+
     all_conversations.sort(
         key=lambda c: c.get("createdAt", 0), reverse=True
     )

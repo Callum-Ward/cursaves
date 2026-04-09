@@ -1,6 +1,6 @@
 # How Cursor Stores Chat Data
 
-This document describes how Cursor IDE stores agent/chat conversation data internally, based on reverse-engineering the storage format in February 2026 (Cursor version at that time). This may change in future Cursor versions.
+This document describes how Cursor IDE stores agent/chat conversation data internally, based on reverse-engineering the storage format. Originally documented in February 2026 (Cursor ~2.6), updated in April 2026 for the Cursor 3.0 migration.
 
 ## Overview
 
@@ -72,17 +72,103 @@ All of these are required for a conversation to be fully functional on another m
 
 ### How a conversation loads
 
+**Cursor ≤2.6:**
 ```
 Open project
   → Cursor reads workspace DB
   → Gets list of composer IDs from allComposers
   → Shows them in the sidebar
+```
 
+**Cursor 3.0+:**
+```
+Open project
+  → Cursor uses internal discovery (no allComposers)
+  → Populates sidebar from selectedComposerIds and internal index
+```
+
+**Both versions:**
+```
 Click a conversation
   → Cursor queries global DB for composerData:{UUID}
   → Gets the full JSON blob
   → Renders the conversation
 ```
+
+## Cursor 3.0 Migration (April 2026)
+
+Cursor 3.0 (released April 2, 2026) introduced a **breaking, one-way database migration** that changes how chats are associated with workspaces. This migration runs automatically when a workspace is first opened in Cursor 3.0+.
+
+### What changed
+
+**Before (Cursor ≤2.6):** The workspace DB's `composer.composerData` in `ItemTable` contained an `allComposers` array — a complete list of every conversation belonging to that workspace. This was the sidebar's source of truth.
+
+```json
+{
+  "allComposers": [
+    {"composerId": "abc-123", "name": "My chat", ...},
+    {"composerId": "def-456", "name": "Another chat", ...}
+  ],
+  "selectedComposerIds": ["abc-123"]
+}
+```
+
+**After (Cursor 3.0+):** The `allComposers` array is **removed** on first launch. Only `selectedComposerIds` (currently open tabs) and `lastFocusedComposerIds` remain. New keys appear in the workspace DB:
+
+| New key pattern | Purpose |
+|----------------|---------|
+| `workbench.panel.composerChatViewPane.*` | Tracks which chat tabs are open in the Chat view |
+| `newAgentSidebar.*` | Agent sidebar state |
+| `cursor/agentLayout.*` | Agent panel layout configuration |
+
+```json
+{
+  "selectedComposerIds": ["abc-123"],
+  "lastFocusedComposerIds": ["abc-123"],
+  "hasMigratedComposerData": true,
+  "hasMigratedMultipleComposers": true
+}
+```
+
+### Impact
+
+- The migration is **one-way** — Cursor does not restore `allComposers` if you downgrade.
+- **Actual chat data is unchanged** — `composerData:UUID`, `bubbleId:*`, checkpoint entries, etc. in the global DB are identical.
+- The sidebar now uses Cursor's internal discovery mechanism rather than a stored list. This is opaque — it likely uses an in-memory index or scans the global DB at startup.
+
+### How cursaves handles this
+
+As of v0.8.0, cursaves supports both schemas:
+
+**Discovery (reading):**
+1. Check for `allComposers` in the workspace DB (Cursor 2.x — fast, complete)
+2. If absent, gather IDs from `selectedComposerIds`, `lastFocusedComposerIds`, and `composerChatViewPane.*` entries (Cursor 3.0+)
+3. For each ID found, fetch full metadata from the global DB's `composerData:{id}` entry
+
+**Registration (writing):**
+- For **Cursor 2.x** workspaces: append to `allComposers` + `selectedComposerIds` (as before)
+- For **Cursor 3.0+** workspaces: write to `selectedComposerIds` + create a `composerChatViewPane` entry (mimics what Cursor creates when you open a chat tab)
+- In both cases, the conversation data itself is written to the global DB identically
+
+### Chat vs Agents views
+
+Cursor 3.0 introduced a dedicated **Agents window** alongside the existing **Chat window**. Each conversation has a `unifiedMode` field in its global DB `composerData` entry:
+
+- `"chat"` — appears in the Chat view
+- `"agent"` — appears in the Agents view
+
+These are the same underlying data, but Cursor filters them into separate UI panels based on this field.
+
+### How to detect which schema a workspace uses
+
+Check if `allComposers` exists in `composer.composerData`:
+
+```python
+data = cdb.get_json("composer.composerData", table="ItemTable")
+is_migrated = data is not None and "allComposers" not in data
+```
+
+On a typical machine running Cursor 3.0, recently-opened workspaces will have migrated while older workspaces (not opened since the update) retain the old format.
 
 ## Conversation Data Structure
 

@@ -137,26 +137,14 @@ def _workspace_sync_summary(ws: dict, _global_cdb: "Optional[db.CursorDB]" = Non
     if not db_path.exists():
         return ""
 
-    try:
-        with db.CursorDB(db_path) as cdb:
-            data = cdb.get_json("composer.composerData", table="ItemTable")
-    except Exception:
-        return ""
-
-    if not data:
-        return ""
-
-    composers = data.get("allComposers", [])
-    if not composers:
+    composer_ids = paths.get_workspace_composer_ids(db_path)
+    if not composer_ids:
         return ""
 
     project_id = paths.get_project_identifier(ws["path"])
 
     counts = {"up_to_date": 0, "local_ahead": 0, "behind": 0, "never_pushed": 0}
-    for c in composers:
-        cid = c.get("composerId")
-        if not cid:
-            continue
+    for cid in composer_ids:
         status = get_push_status_for_conversation(cid, project_id, _cdb=_global_cdb)
         counts[status] = counts.get(status, 0) + 1
 
@@ -700,29 +688,25 @@ def _find_ahead_conversations() -> list[dict]:
             if not db_path.exists():
                 continue
 
-            try:
-                with db.CursorDB(db_path) as cdb:
-                    data = cdb.get_json("composer.composerData", table="ItemTable")
-            except Exception:
-                continue
-            if not data:
+            composer_ids = paths.get_workspace_composer_ids(db_path)
+            if not composer_ids:
                 continue
 
             project_id = paths.get_project_identifier(ws["path"])
-            composers = data.get("allComposers", [])
 
-            for c in composers:
-                cid = c.get("composerId")
-                if not cid:
-                    continue
+            for cid in composer_ids:
                 status = get_push_status_for_conversation(cid, project_id, _cdb=global_cdb)
                 if status == "local_ahead":
+                    # Get chat name from global DB
+                    cd = global_cdb.get_json(f"composerData:{cid}")
+                    name = cd.get("name", "Untitled") if cd else "Untitled"
+
                     ws_name = os.path.basename(os.path.normpath(ws["path"])) or ws["path"]
                     host = ws.get("host", "")
                     ws_label = f"{ws_name} ({host})" if host else ws_name
                     ahead_items.append({
                         "composerId": cid,
-                        "name": c.get("name", "Untitled"),
+                        "name": name,
                         "workspace_label": ws_label,
                         "workspace_dir": ws_dir,
                         "project_path": ws["path"],
@@ -945,21 +929,10 @@ def _pull_behind(sync_dir: Path) -> int:
                 ws_db_path = ws["workspace_dir"] / "state.vscdb"
                 if not ws_db_path.exists():
                     continue
-                try:
-                    with db.CursorDB(ws_db_path) as wdb:
-                        ws_data = wdb.get_json("composer.composerData", table="ItemTable")
-                except Exception:
-                    continue
-                if not ws_data:
-                    continue
-                registered_ids = {
-                    c.get("composerId")
-                    for c in ws_data.get("allComposers", [])
-                    if c.get("composerId")
-                }
+                ws_composer_ids = set(paths.get_workspace_composer_ids(ws_db_path))
                 for sf, meta in behind_snapshots:
                     cid = meta.get("composerId", "")
-                    if cid in registered_ids:
+                    if cid in ws_composer_ids:
                         cid_to_workspaces.setdefault(cid, []).append(ws)
 
             for sf, meta in behind_snapshots:

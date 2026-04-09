@@ -430,54 +430,7 @@ def import_snapshot(
         backup_path = db.backup_db(ws_db_path)
         print(f"  Backed up workspace DB to {backup_path.name}")
 
-    ws_cdb = db.CursorDB(ws_db_path)
-    try:
-        # Read existing composer list
-        existing = ws_cdb.get_json("composer.composerData", table="ItemTable")
-        if existing is None:
-            existing = {"allComposers": [], "selectedComposerIds": []}
-
-        # Check if this conversation is already registered
-        all_composers = existing.get("allComposers", [])
-        existing_ids = {c.get("composerId") for c in all_composers}
-
-        if composer_id not in existing_ids:
-            all_composers.append({
-                "type": "head",
-                "composerId": composer_id,
-                "lastUpdatedAt": composer_data.get("lastUpdatedAt", composer_data.get("createdAt", 0)),
-                "createdAt": composer_data.get("createdAt", 0),
-                "unifiedMode": composer_data.get("unifiedMode", "agent"),
-                "forceMode": composer_data.get("forceMode", ""),
-                "hasUnreadMessages": False,
-                "totalLinesAdded": composer_data.get("totalLinesAdded", 0),
-                "totalLinesRemoved": composer_data.get("totalLinesRemoved", 0),
-                "filesChangedCount": composer_data.get("filesChangedCount", 0),
-                "subtitle": composer_data.get("subtitle", ""),
-                "isArchived": False,
-                "isDraft": False,
-                "isWorktree": False,
-                "isSpec": False,
-                "isBestOfNSubcomposer": False,
-                "numSubComposers": len(composer_data.get("subComposerIds", [])),
-                "referencedPlans": [],
-                "name": composer_data.get("name", "Imported conversation"),
-            })
-            existing["allComposers"] = all_composers
-
-        # Set as selected so it shows up in the sidebar
-        selected = existing.get("selectedComposerIds", [])
-        if composer_id not in selected:
-            selected.append(composer_id)
-            existing["selectedComposerIds"] = selected
-
-        # Ensure migration flags are set (Cursor expects these)
-        existing.setdefault("hasMigratedComposerData", True)
-        existing.setdefault("hasMigratedMultipleComposers", True)
-
-        ws_cdb.write_json("composer.composerData", existing, table="ItemTable")
-    finally:
-        ws_cdb.close()
+    _register_in_workspace(composer_id, composer_data, ws_dir)
 
     # ── Step 4: Verify writes ─────────────────────────────────────────
     verify_cdb = db.CursorDB(global_db_path)
@@ -834,56 +787,94 @@ def _register_in_workspace(
     """Register a conversation in a workspace's sidebar.
 
     The conversation data must already exist in the global DB.
-    This only updates the workspace DB's allComposers list.
+    Handles both Cursor 2.x (allComposers) and 3.0+ (selectedComposerIds
+    + composerChatViewPane) workspace schemas.
     """
     ws_db_path = ws_dir / "state.vscdb"
     ws_cdb = db.CursorDB(ws_db_path)
     try:
         existing = ws_cdb.get_json("composer.composerData", table="ItemTable")
         if existing is None:
-            existing = {"allComposers": [], "selectedComposerIds": []}
+            existing = {"selectedComposerIds": []}
 
-        all_composers = existing.get("allComposers", [])
-        existing_ids = {c.get("composerId") for c in all_composers}
+        is_migrated = "allComposers" not in existing
 
-        if composer_id in existing_ids:
-            return True  # Already registered
+        if not is_migrated:
+            # Cursor 2.x: write to allComposers
+            all_composers = existing.get("allComposers", [])
+            existing_ids = {c.get("composerId") for c in all_composers}
 
-        all_composers.append({
-            "type": "head",
-            "composerId": composer_id,
-            "lastUpdatedAt": composer_data.get("lastUpdatedAt", composer_data.get("createdAt", 0)),
-            "createdAt": composer_data.get("createdAt", 0),
-            "unifiedMode": composer_data.get("unifiedMode", "agent"),
-            "forceMode": composer_data.get("forceMode", ""),
-            "hasUnreadMessages": False,
-            "totalLinesAdded": composer_data.get("totalLinesAdded", 0),
-            "totalLinesRemoved": composer_data.get("totalLinesRemoved", 0),
-            "filesChangedCount": composer_data.get("filesChangedCount", 0),
-            "subtitle": composer_data.get("subtitle", ""),
-            "isArchived": False,
-            "isDraft": False,
-            "isWorktree": False,
-            "isSpec": False,
-            "isBestOfNSubcomposer": False,
-            "numSubComposers": len(composer_data.get("subComposerIds", [])),
-            "referencedPlans": [],
-            "name": composer_data.get("name", "Imported conversation"),
-        })
-        existing["allComposers"] = all_composers
+            if composer_id not in existing_ids:
+                all_composers.append({
+                    "type": "head",
+                    "composerId": composer_id,
+                    "lastUpdatedAt": composer_data.get("lastUpdatedAt", composer_data.get("createdAt", 0)),
+                    "createdAt": composer_data.get("createdAt", 0),
+                    "unifiedMode": composer_data.get("unifiedMode", "agent"),
+                    "forceMode": composer_data.get("forceMode", ""),
+                    "hasUnreadMessages": False,
+                    "totalLinesAdded": composer_data.get("totalLinesAdded", 0),
+                    "totalLinesRemoved": composer_data.get("totalLinesRemoved", 0),
+                    "filesChangedCount": composer_data.get("filesChangedCount", 0),
+                    "subtitle": composer_data.get("subtitle", ""),
+                    "isArchived": False,
+                    "isDraft": False,
+                    "isWorktree": False,
+                    "isSpec": False,
+                    "isBestOfNSubcomposer": False,
+                    "numSubComposers": len(composer_data.get("subComposerIds", [])),
+                    "referencedPlans": [],
+                    "name": composer_data.get("name", "Imported conversation"),
+                })
+                existing["allComposers"] = all_composers
 
+        # Both schemas: add to selectedComposerIds
         selected = existing.get("selectedComposerIds", [])
         if composer_id not in selected:
             selected.append(composer_id)
             existing["selectedComposerIds"] = selected
 
+        if "lastFocusedComposerIds" in existing:
+            focused = existing["lastFocusedComposerIds"]
+            if composer_id not in focused:
+                focused.append(composer_id)
+
         existing.setdefault("hasMigratedComposerData", True)
         existing.setdefault("hasMigratedMultipleComposers", True)
 
         ws_cdb.write_json("composer.composerData", existing, table="ItemTable")
+
+        # Cursor 3.0+: also create a composerChatViewPane entry so the
+        # chat appears as an openable tab in the agents/chat UI
+        if is_migrated:
+            _ensure_chat_view_pane(ws_cdb, composer_id)
+
         return True
     finally:
         ws_cdb.close()
+
+
+def _ensure_chat_view_pane(ws_cdb: "db.CursorDB", composer_id: str):
+    """Create a composerChatViewPane entry for a chat in a Cursor 3.0+ workspace.
+
+    Mirrors the structure Cursor creates when a chat tab is opened.
+    """
+    import uuid
+
+    pane_id = str(uuid.uuid4())
+    view_key = f"workbench.panel.aichat.view.{composer_id}"
+    pane_data = {view_key: {"collapsed": False, "isHidden": False}}
+
+    ws_cdb.write_json(
+        f"workbench.panel.composerChatViewPane.{pane_id}",
+        pane_data,
+        table="ItemTable",
+    )
+    ws_cdb.write_json(
+        f"workbench.panel.aichat.{pane_id}.numberOfVisibleViews",
+        1,
+        table="ItemTable",
+    )
 
 
 def copy_between_workspaces(
@@ -921,13 +912,13 @@ def copy_between_workspaces(
     target_db_path = target_ws_dir / "state.vscdb"
     target_names = {}
     if target_db_path.exists():
-        with db.CursorDB(target_db_path) as tcdb:
-            target_data = tcdb.get_json("composer.composerData", table="ItemTable")
-            if target_data:
-                for c in target_data.get("allComposers", []):
-                    cid = c.get("composerId")
-                    if cid:
-                        target_names[cid] = c.get("name", "Untitled")
+        target_ids = paths.get_workspace_composer_ids(target_db_path)
+        if target_ids:
+            with db.CursorDB(paths.get_global_db_path()) as gcdb:
+                for cid in target_ids:
+                    cd = gcdb.get_json(f"composerData:{cid}")
+                    if cd:
+                        target_names[cid] = cd.get("name", "Untitled")
 
     # Read source data and write copies
     read_cdb = db.CursorDB(global_db_path)
@@ -1171,6 +1162,8 @@ def doctor_audit() -> dict:
     storage["workspace_storage_mb"] = ws_total / (1024 * 1024)
 
     # --- Build registration map from all workspaces ---
+    # Supports both Cursor 2.x (allComposers) and 3.0+ (selectedComposerIds
+    # + composerChatViewPane) schemas.
     registered_ids: dict[str, list[dict]] = {}  # composerId -> [workspace info]
     workspace_summaries = []
 
@@ -1179,16 +1172,9 @@ def doctor_audit() -> dict:
         ws_db_path = ws["workspace_dir"] / "state.vscdb"
         if not ws_db_path.exists():
             continue
-        try:
-            with db.CursorDB(ws_db_path) as cdb:
-                data = cdb.get_json("composer.composerData", table="ItemTable")
-        except Exception:
-            continue
-        if not data:
-            continue
 
-        composers = data.get("allComposers", [])
-        if not composers:
+        ws_composer_ids = paths.get_workspace_composer_ids(ws_db_path)
+        if not ws_composer_ids:
             continue
 
         ws_label = os.path.basename(ws["path"])
@@ -1200,18 +1186,16 @@ def doctor_audit() -> dict:
             "path": ws["path"],
             "host": ws.get("host"),
             "workspace_dir": ws["workspace_dir"],
-            "chat_count": len(composers),
+            "chat_count": len(ws_composer_ids),
         })
 
-        for c in composers:
-            cid = c.get("composerId")
-            if cid:
-                if cid not in registered_ids:
-                    registered_ids[cid] = []
-                registered_ids[cid].append({
-                    "label": ws_label,
-                    "workspace_dir": ws["workspace_dir"],
-                })
+        for cid in ws_composer_ids:
+            if cid not in registered_ids:
+                registered_ids[cid] = []
+            registered_ids[cid].append({
+                "label": ws_label,
+                "workspace_dir": ws["workspace_dir"],
+            })
 
     # --- Build workspace-by-path map for orphan matching ---
     ws_by_path: dict[str, list[dict]] = {}

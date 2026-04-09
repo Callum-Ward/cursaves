@@ -244,29 +244,72 @@ def list_all_workspaces() -> list[dict]:
     return workspaces
 
 
+def get_workspace_composer_ids(ws_db_path: Path) -> list[str]:
+    """Extract all composer IDs associated with a workspace.
+
+    Handles both Cursor 2.x (allComposers list) and Cursor 3.0+
+    (selectedComposerIds + composerChatViewPane entries) schemas.
+    Returns deduplicated IDs.
+    """
+    from . import db
+
+    ids: set[str] = set()
+    try:
+        with db.CursorDB(ws_db_path) as cdb:
+            data = cdb.get_json("composer.composerData", table="ItemTable")
+            if not data:
+                return []
+
+            # Cursor 2.x: allComposers has the full list
+            for c in data.get("allComposers", []):
+                cid = c.get("composerId")
+                if cid:
+                    ids.add(cid)
+
+            # Cursor 3.0+: allComposers is gone; gather from other sources
+            if not ids:
+                for cid in data.get("selectedComposerIds", []):
+                    if cid:
+                        ids.add(cid)
+                for cid in data.get("lastFocusedComposerIds", []):
+                    if cid:
+                        ids.add(cid)
+
+                # composerChatViewPane entries reference chats opened in tabs
+                for key in cdb.list_keys(
+                    "workbench.panel.composerChatViewPane.", table="ItemTable"
+                ):
+                    pane = cdb.get_json(key, table="ItemTable")
+                    if isinstance(pane, dict):
+                        for view_key in pane:
+                            # format: workbench.panel.aichat.view.{composerId}
+                            if ".view." in view_key:
+                                cid = view_key.rsplit(".", 1)[-1]
+                                if cid:
+                                    ids.add(cid)
+    except Exception:
+        return []
+    return list(ids)
+
+
 def list_workspaces_with_conversations() -> list[dict]:
     """List workspaces that have at least one conversation.
 
     Returns the same dicts as list_all_workspaces(), plus a
     'conversations' key with the count.
-    """
-    from . import db
 
+    Supports both Cursor 2.x (allComposers) and 3.0+ (selectedComposerIds
+    + composerChatViewPane) workspace schemas.
+    """
     result = []
     for ws in list_all_workspaces():
         db_path = ws["workspace_dir"] / "state.vscdb"
         if not db_path.exists():
             continue
-        try:
-            with db.CursorDB(db_path) as cdb:
-                data = cdb.get_json("composer.composerData", table="ItemTable")
-                if data:
-                    composers = data.get("allComposers", [])
-                    if composers:
-                        ws["conversations"] = len(composers)
-                        result.append(ws)
-        except Exception:
-            continue
+        composer_ids = get_workspace_composer_ids(db_path)
+        if composer_ids:
+            ws["conversations"] = len(composer_ids)
+            result.append(ws)
     return result
 
 
