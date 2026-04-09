@@ -1272,6 +1272,7 @@ def doctor_audit() -> dict:
 
 def doctor_recover(
     composer_ids: Optional[list[str]] = None,
+    force: bool = False,
 ) -> tuple[int, int]:
     """Re-register orphaned chats in the most appropriate workspace.
 
@@ -1281,10 +1282,11 @@ def doctor_recover(
 
     Args:
         composer_ids: Specific IDs to recover, or None for all orphaned.
+        force: Skip the Cursor-running check.
 
     Returns (recovered, failed).
     """
-    if is_cursor_running():
+    if not force and is_cursor_running():
         print(
             "WARNING: Cursor is running. Close Cursor FIRST (Cmd+Q / quit),\n"
             "then run this command, then reopen Cursor.\n"

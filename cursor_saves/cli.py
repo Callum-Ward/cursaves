@@ -1718,7 +1718,7 @@ def cmd_doctor(args):
             selected_ids = [o["composerId"] for o in orphaned]
 
         print(f"\n  Recovering {len(selected_ids)} chat(s)...\n")
-        recovered, failed = doctor_recover(composer_ids=selected_ids)
+        recovered, failed = doctor_recover(composer_ids=selected_ids, force=getattr(args, "force", False))
 
         if recovered > 0:
             print(f"\n  Recovered {recovered} chat(s).")
@@ -1948,6 +1948,10 @@ def main():
     p_doctor.add_argument(
         "--select", "-s", action="store_true",
         help="Interactively select which orphaned chats to recover",
+    )
+    p_doctor.add_argument(
+        "--force", action="store_true",
+        help="Skip the Cursor-running check (use if you can't fully quit Cursor)",
     )
     p_doctor.set_defaults(func=cmd_doctor)
 
