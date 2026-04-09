@@ -12,6 +12,8 @@ from . import __version__, db, export, paths
 from .backends import GitBackend, S3Backend, SyncBackend, get_backend, load_config, save_config
 from .importer import (
     copy_between_workspaces,
+    doctor_audit,
+    doctor_recover,
     find_snapshot_dir_for_project,
     format_sync_status,
     get_push_status_for_conversation,
@@ -1645,6 +1647,91 @@ def cmd_delete(args):
         print("Synced to remote.")
 
 
+def cmd_doctor(args):
+    """Audit and recover orphaned chats."""
+    from .export import format_timestamp
+
+    audit = doctor_audit()
+    storage = audit["storage"]
+
+    print(
+        f"\n  ─── Cursor Storage ──────────────────────────────────────────\n"
+        f"\n"
+        f"  Global DB:           {storage['global_db_mb']:.0f} MB\n"
+        f"  WAL file:            {storage.get('wal_mb', 0):.1f} MB\n"
+        f"  Workspace storage:   {storage['workspace_storage_mb']:.0f} MB\n"
+    )
+
+    print(
+        f"  ─── Chat Audit ─────────────────────────────────────────────\n"
+        f"\n"
+        f"  Total chats in DB:   {audit['total']}\n"
+        f"  Registered:          {audit['registered']}\n"
+        f"  Orphaned (content):  {len(audit['orphaned'])}\n"
+        f"  Empty stubs:         {audit['empty']}\n"
+    )
+
+    if audit["workspaces"]:
+        print(
+            f"  ─── Workspaces with chats ───────────────────────────────────\n"
+        )
+        for ws in audit["workspaces"]:
+            print(f"  {ws['chat_count']:>3} chats   {ws['label']}")
+        print()
+
+    orphaned = audit["orphaned"]
+    if not orphaned:
+        print("  No orphaned chats found.\n")
+        return
+
+    print(
+        f"  ─── Orphaned chats ({len(orphaned)}) ──────────────────────────────────\n"
+    )
+    print(f"  {'#':<4} {'Name':<40} {'Msgs':>5}  {'Last Updated'}")
+    print(f"  {'-' * 75}")
+
+    for i, chat in enumerate(orphaned, 1):
+        name = chat["name"]
+        if len(name) > 38:
+            name = name[:35] + "..."
+        updated = format_timestamp(chat["lastUpdatedAt"])
+        print(f"  {i:<4} {name:<40} {chat['messageCount']:>5}  {updated}")
+
+    print()
+
+    if args.recover:
+        if args.select:
+            print(f"  Select chats to recover (e.g. 1,3,5 or 1-3 or 'all') [all]:")
+            try:
+                choice = input("  > ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return
+            if not choice:
+                choice = "all"
+            indices = _parse_selection(choice, len(orphaned))
+            if not indices:
+                return
+            selected_ids = [orphaned[i - 1]["composerId"] for i in indices]
+        else:
+            selected_ids = [o["composerId"] for o in orphaned]
+
+        print(f"\n  Recovering {len(selected_ids)} chat(s)...\n")
+        recovered, failed = doctor_recover(composer_ids=selected_ids)
+
+        if recovered > 0:
+            print(f"\n  Recovered {recovered} chat(s).")
+            from .reload import print_reload_hint
+            print_reload_hint()
+        if failed > 0:
+            print(f"  {failed} chat(s) could not be matched to a workspace.")
+    else:
+        print(
+            f"  Run 'cursaves doctor --recover' to re-register orphaned chats.\n"
+            f"  Run 'cursaves doctor --recover -s' to select which chats to recover.\n"
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="cursaves",
@@ -1849,6 +1936,20 @@ def main():
     p_watch.add_argument("--verbose", "-v", action="store_true", help="Print on every check")
     p_watch.set_defaults(func=cmd_watch)
 
+    # ── doctor ─────────────────────────────────────────────────────
+    p_doctor = subparsers.add_parser(
+        "doctor", help="Audit chats and recover orphaned conversations"
+    )
+    p_doctor.add_argument(
+        "--recover", action="store_true",
+        help="Re-register orphaned chats in their workspaces",
+    )
+    p_doctor.add_argument(
+        "--select", "-s", action="store_true",
+        help="Interactively select which orphaned chats to recover",
+    )
+    p_doctor.set_defaults(func=cmd_doctor)
+
     args = parser.parse_args()
     if not args.command:
         print(
@@ -1875,6 +1976,8 @@ def main():
             "  list                  List chats for this project\n"
             "  snapshots             List saved snapshots in ~/.cursaves/\n"
             "  status                Show synced vs local-only chats\n"
+            "  doctor                Audit chats, find orphaned conversations\n"
+            "  doctor --recover      Re-register orphaned chats in workspaces\n"
             "  delete -s             Select which snapshots to delete\n"
             "  delete --all-projects Delete ALL snapshots\n"
             "\n"

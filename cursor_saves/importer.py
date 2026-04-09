@@ -1139,3 +1139,248 @@ def repair_missing_blobs(verbose: bool = False) -> tuple[int, int]:
         print(f"  {remaining} blob(s) not found in any snapshot (from conversations not yet pushed)")
 
     return conversations_fixed, len(restored_blobs)
+
+
+# ── Doctor: audit and recover orphaned chats ─────────────────────────
+
+
+def doctor_audit() -> dict:
+    """Audit all chats in the global DB against workspace registrations.
+
+    Returns a dict with:
+      storage: dict with size info
+      total: total composerData entries
+      registered: count registered in at least one workspace
+      orphaned: list of dicts for orphaned chats with content
+      empty: count of empty/stub chats
+      workspaces: list of workspace summary dicts
+    """
+    global_db_path = paths.get_global_db_path()
+    ws_storage = paths.get_workspace_storage_dir()
+
+    # --- Storage info ---
+    storage = {}
+    gdb_stat = global_db_path.stat()
+    storage["global_db_mb"] = gdb_stat.st_size / (1024 * 1024)
+    wal_path = global_db_path.parent / (global_db_path.name + "-wal")
+    if wal_path.exists():
+        storage["wal_mb"] = wal_path.stat().st_size / (1024 * 1024)
+    ws_total = sum(
+        f.stat().st_size for f in ws_storage.rglob("*") if f.is_file()
+    ) if ws_storage.exists() else 0
+    storage["workspace_storage_mb"] = ws_total / (1024 * 1024)
+
+    # --- Build registration map from all workspaces ---
+    registered_ids: dict[str, list[dict]] = {}  # composerId -> [workspace info]
+    workspace_summaries = []
+
+    all_ws = paths.list_all_workspaces()
+    for ws in all_ws:
+        ws_db_path = ws["workspace_dir"] / "state.vscdb"
+        if not ws_db_path.exists():
+            continue
+        try:
+            with db.CursorDB(ws_db_path) as cdb:
+                data = cdb.get_json("composer.composerData", table="ItemTable")
+        except Exception:
+            continue
+        if not data:
+            continue
+
+        composers = data.get("allComposers", [])
+        if not composers:
+            continue
+
+        ws_label = os.path.basename(ws["path"])
+        if ws["host"]:
+            ws_label += f" ({ws['host']})"
+
+        workspace_summaries.append({
+            "label": ws_label,
+            "path": ws["path"],
+            "host": ws.get("host"),
+            "workspace_dir": ws["workspace_dir"],
+            "chat_count": len(composers),
+        })
+
+        for c in composers:
+            cid = c.get("composerId")
+            if cid:
+                if cid not in registered_ids:
+                    registered_ids[cid] = []
+                registered_ids[cid].append({
+                    "label": ws_label,
+                    "workspace_dir": ws["workspace_dir"],
+                })
+
+    # --- Scan global DB ---
+    orphaned = []
+    registered_count = 0
+    empty_count = 0
+
+    with db.CursorDB(global_db_path) as cdb:
+        all_keys = cdb.list_keys("composerData:")
+        for key in all_keys:
+            cid = key.split(":", 1)[1]
+            cd = cdb.get_json(key)
+            if not cd:
+                continue
+
+            name = cd.get("name") or ""
+            msgs = len(cd.get("fullConversationHeadersOnly", []))
+
+            if cid in registered_ids:
+                registered_count += 1
+            elif msgs == 0 and not name:
+                empty_count += 1
+            else:
+                orphaned.append({
+                    "composerId": cid,
+                    "name": name or "Untitled",
+                    "messageCount": msgs,
+                    "createdAt": cd.get("createdAt", 0),
+                    "lastUpdatedAt": cd.get("lastUpdatedAt", 0),
+                })
+
+    orphaned.sort(key=lambda x: x["messageCount"], reverse=True)
+
+    return {
+        "storage": storage,
+        "total": len(all_keys),
+        "registered": registered_count,
+        "orphaned": orphaned,
+        "empty": empty_count,
+        "workspaces": workspace_summaries,
+    }
+
+
+def doctor_recover(
+    composer_ids: Optional[list[str]] = None,
+) -> tuple[int, int]:
+    """Re-register orphaned chats in the most appropriate workspace.
+
+    For each orphaned chat, finds the best workspace by scanning all
+    workspaces for matching project paths (using bubble entry file
+    references and composerData context).
+
+    Args:
+        composer_ids: Specific IDs to recover, or None for all orphaned.
+
+    Returns (recovered, failed).
+    """
+    if is_cursor_running():
+        print(
+            "WARNING: Cursor is running. Close Cursor FIRST (Cmd+Q / quit),\n"
+            "then run this command, then reopen Cursor.\n"
+            "Use --force to override (not recommended).\n",
+            file=sys.stderr,
+        )
+        return 0, 0
+
+    global_db_path = paths.get_global_db_path()
+    all_ws = paths.list_all_workspaces()
+
+    # Build map: workspace path -> best workspace dir (newest first, already sorted)
+    ws_by_path: dict[str, list[dict]] = {}
+    for ws in all_ws:
+        p = ws["path"]
+        if p not in ws_by_path:
+            ws_by_path[p] = []
+        ws_by_path[p].append(ws)
+
+    # Get the audit to find orphaned chats
+    audit = doctor_audit()
+    orphaned = audit["orphaned"]
+    if composer_ids:
+        orphaned = [o for o in orphaned if o["composerId"] in composer_ids]
+
+    if not orphaned:
+        print("No orphaned chats to recover.")
+        return 0, 0
+
+    recovered = 0
+    failed = 0
+
+    with db.CursorDB(global_db_path) as cdb:
+        for chat in orphaned:
+            cid = chat["composerId"]
+            cd = cdb.get_json(f"composerData:{cid}")
+            if not cd:
+                failed += 1
+                continue
+
+            name = chat["name"]
+            target_ws = _find_best_workspace(cid, cd, cdb, ws_by_path)
+
+            if not target_ws:
+                print(f"  No workspace found for: \"{name}\" ({cid[:12]}...)")
+                failed += 1
+                continue
+
+            ws_dir = target_ws["workspace_dir"]
+            ws_label = os.path.basename(target_ws["path"])
+            if target_ws.get("host"):
+                ws_label += f" ({target_ws['host']})"
+
+            if _register_in_workspace(cid, cd, ws_dir):
+                print(f"  Recovered: \"{name}\" → {ws_label}")
+                recovered += 1
+            else:
+                print(f"  Failed: \"{name}\"")
+                failed += 1
+
+    return recovered, failed
+
+
+def _find_best_workspace(
+    composer_id: str,
+    composer_data: dict,
+    cdb: "db.CursorDB",
+    ws_by_path: dict[str, list[dict]],
+) -> Optional[dict]:
+    """Find the best workspace to register an orphaned chat in.
+
+    Strategy:
+    1. Check bubble entries for file paths that match a workspace
+    2. Check composerData context for workspace path hints
+    3. Check selectedComposerIds in workspace DBs (ghost references)
+    """
+    # Strategy 1: scan a few bubble entries for file paths
+    bubble_keys = cdb.list_keys(f"bubbleId:{composer_id}:")
+    file_paths_seen: dict[str, int] = {}  # workspace path -> count
+
+    for key in bubble_keys[:20]:
+        val = cdb.get_item(key, table="cursorDiskKV")
+        if not val:
+            continue
+        for ws_path in ws_by_path:
+            if ws_path in val and len(ws_path) > 5:
+                file_paths_seen[ws_path] = file_paths_seen.get(ws_path, 0) + 1
+
+    if file_paths_seen:
+        best_path = max(file_paths_seen, key=file_paths_seen.get)
+        return ws_by_path[best_path][0]
+
+    # Strategy 2: check composerData for path references
+    cd_str = json.dumps(composer_data)
+    for ws_path in ws_by_path:
+        if ws_path in cd_str and len(ws_path) > 5:
+            return ws_by_path[ws_path][0]
+
+    # Strategy 3: check workspace DBs for ghost selectedComposerIds
+    for ws_path, ws_list in ws_by_path.items():
+        for ws in ws_list:
+            ws_db_path = ws["workspace_dir"] / "state.vscdb"
+            if not ws_db_path.exists():
+                continue
+            try:
+                with db.CursorDB(ws_db_path) as ws_cdb:
+                    data = ws_cdb.get_json("composer.composerData", table="ItemTable")
+                    if data:
+                        selected = data.get("selectedComposerIds", [])
+                        if composer_id in selected:
+                            return ws
+            except Exception:
+                continue
+
+    return None
