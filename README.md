@@ -237,10 +237,10 @@ The watch daemon polls for database changes, auto-checkpoints when conversations
 
 Cursor stores conversations in two local SQLite databases, not as files you can easily copy:
 
-- **Workspace DB** (`workspaceStorage/{id}/state.vscdb`): Links conversations to a workspace. In Cursor ≤2.6, this contains a complete chat list (`allComposers`). In Cursor 3.0+, the list is removed and Cursor uses internal discovery instead.
-- **Global DB** (`globalStorage/state.vscdb`): The actual conversation content -- one JSON blob per conversation, keyed by `composerData:{UUID}`. This is unchanged across Cursor versions.
+- **Workspace DB** (`workspaceStorage/{id}/state.vscdb`): Links conversations to a workspace. In Cursor ≤2.6, this contains a chat list (`allComposers`). In Cursor 3.0+, this list is removed and replaced by a central index in the global DB.
+- **Global DB** (`globalStorage/state.vscdb`): The actual conversation content -- one JSON blob per conversation, keyed by `composerData:{UUID}`. In Cursor 3.0+, also contains `composer.composerHeaders` -- a central index mapping every chat to its workspace.
 
-> **Cursor 3.0 migration (April 2026):** Cursor 3.0 removes the `allComposers` array from workspace databases. cursaves v0.8.0+ handles both formats transparently. See [docs/how-cursor-stores-chats.md](docs/how-cursor-stores-chats.md) for details.
+> **Cursor 3.0 migration (April 2026):** Cursor 3.0 centralized the chat-workspace index from per-workspace DBs into the global DB. cursaves handles both formats transparently. See [docs/how-cursor-stores-chats.md](docs/how-cursor-stores-chats.md) for details.
 
 Data locations:
 

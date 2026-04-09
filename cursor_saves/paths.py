@@ -244,51 +244,119 @@ def list_all_workspaces() -> list[dict]:
     return workspaces
 
 
+def get_global_composer_headers() -> list[dict]:
+    """Read the central composer.composerHeaders from the global DB.
+
+    Returns the allComposers list from composer.composerHeaders in the
+    global DB's ItemTable. In Cursor 3.0+ this is the authoritative
+    index of all chats, each tagged with a workspaceIdentifier.
+
+    Returns an empty list if not present (pre-3.0 Cursor).
+    """
+    from . import db
+
+    global_db = get_global_db_path()
+    if not global_db.exists():
+        return []
+    try:
+        with db.CursorDB(global_db) as cdb:
+            headers = cdb.get_json("composer.composerHeaders", table="ItemTable")
+            if headers and isinstance(headers, dict):
+                return headers.get("allComposers", [])
+    except Exception:
+        pass
+    return []
+
+
+_global_headers_cache: Optional[dict[str, list[dict]]] = None
+
+
+def _build_global_headers_map() -> dict[str, list[dict]]:
+    """Build a workspace-hash → [composer header entries] map from the global index.
+
+    Returns a dict keyed by workspace directory hash (workspaceIdentifier.id).
+    Each value is a list of composer header dicts for that workspace.
+    Cached for the lifetime of the process.
+    """
+    global _global_headers_cache
+    if _global_headers_cache is not None:
+        return _global_headers_cache
+
+    result: dict[str, list[dict]] = {}
+    for entry in get_global_composer_headers():
+        wi = entry.get("workspaceIdentifier", {})
+        ws_id = wi.get("id", "")
+        if ws_id:
+            result.setdefault(ws_id, []).append(entry)
+    _global_headers_cache = result
+    return result
+
+
+def invalidate_headers_cache():
+    """Clear the cached global headers map (call after writing to the global DB)."""
+    global _global_headers_cache
+    _global_headers_cache = None
+
+
 def get_workspace_composer_ids(ws_db_path: Path) -> list[str]:
     """Extract all composer IDs associated with a workspace.
 
-    Handles both Cursor 2.x (allComposers list) and Cursor 3.0+
-    (selectedComposerIds + composerChatViewPane entries) schemas.
+    Combines multiple sources for maximum coverage:
+    1. Global composer.composerHeaders index (Cursor 3.0+, most authoritative
+       but only contains recently-active chats)
+    2. Workspace DB selectedComposerIds + composerChatViewPane entries
+       (catches chats opened before the 3.0 migration that aren't yet
+       in the global index)
+    3. Workspace DB allComposers (Cursor 2.x fallback)
+
     Returns deduplicated IDs.
     """
     from . import db
 
     ids: set[str] = set()
+    ws_hash = ws_db_path.parent.name
+
+    # Source 1: global headers index (Cursor 3.0+)
+    headers_map = _build_global_headers_map()
+    for entry in headers_map.get(ws_hash, []):
+        cid = entry.get("composerId")
+        if cid:
+            ids.add(cid)
+
+    # Source 2+3: workspace DB
     try:
         with db.CursorDB(ws_db_path) as cdb:
             data = cdb.get_json("composer.composerData", table="ItemTable")
             if not data:
-                return []
+                return list(ids)
 
-            # Cursor 2.x: allComposers has the full list
+            # Cursor 2.x: allComposers (complete list for old workspaces)
             for c in data.get("allComposers", []):
                 cid = c.get("composerId")
                 if cid:
                     ids.add(cid)
 
-            # Cursor 3.0+: allComposers is gone; gather from other sources
-            if not ids:
-                for cid in data.get("selectedComposerIds", []):
-                    if cid:
-                        ids.add(cid)
-                for cid in data.get("lastFocusedComposerIds", []):
-                    if cid:
-                        ids.add(cid)
+            # Cursor 3.0+: supplementary sources for chats not in global index
+            for cid in data.get("selectedComposerIds", []):
+                if cid:
+                    ids.add(cid)
+            for cid in data.get("lastFocusedComposerIds", []):
+                if cid:
+                    ids.add(cid)
 
-                # composerChatViewPane entries reference chats opened in tabs
-                for key in cdb.list_keys(
-                    "workbench.panel.composerChatViewPane.", table="ItemTable"
-                ):
-                    pane = cdb.get_json(key, table="ItemTable")
-                    if isinstance(pane, dict):
-                        for view_key in pane:
-                            # format: workbench.panel.aichat.view.{composerId}
-                            if ".view." in view_key:
-                                cid = view_key.rsplit(".", 1)[-1]
-                                if cid:
-                                    ids.add(cid)
+            for key in cdb.list_keys(
+                "workbench.panel.composerChatViewPane.", table="ItemTable"
+            ):
+                pane = cdb.get_json(key, table="ItemTable")
+                if isinstance(pane, dict):
+                    for view_key in pane:
+                        if ".view." in view_key:
+                            cid = view_key.rsplit(".", 1)[-1]
+                            if cid:
+                                ids.add(cid)
     except Exception:
-        return []
+        pass
+
     return list(ids)
 
 
@@ -297,9 +365,6 @@ def list_workspaces_with_conversations() -> list[dict]:
 
     Returns the same dicts as list_all_workspaces(), plus a
     'conversations' key with the count.
-
-    Supports both Cursor 2.x (allComposers) and 3.0+ (selectedComposerIds
-    + composerChatViewPane) workspace schemas.
     """
     result = []
     for ws in list_all_workspaces():

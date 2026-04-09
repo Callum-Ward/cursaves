@@ -779,6 +779,106 @@ def import_all_snapshots(
 # ── Local workspace copy ───────────────────────────────────────────────
 
 
+def _build_composer_header_entry(composer_id: str, composer_data: dict) -> dict:
+    """Build a composer header entry suitable for both allComposers and
+    composer.composerHeaders."""
+    return {
+        "type": "head",
+        "composerId": composer_id,
+        "lastUpdatedAt": composer_data.get("lastUpdatedAt", composer_data.get("createdAt", 0)),
+        "createdAt": composer_data.get("createdAt", 0),
+        "unifiedMode": composer_data.get("unifiedMode", "agent"),
+        "forceMode": composer_data.get("forceMode", ""),
+        "hasUnreadMessages": False,
+        "totalLinesAdded": composer_data.get("totalLinesAdded", 0),
+        "totalLinesRemoved": composer_data.get("totalLinesRemoved", 0),
+        "filesChangedCount": composer_data.get("filesChangedCount", 0),
+        "subtitle": composer_data.get("subtitle", ""),
+        "isArchived": False,
+        "isDraft": False,
+        "isWorktree": False,
+        "isSpec": False,
+        "isBestOfNSubcomposer": False,
+        "numSubComposers": len(composer_data.get("subComposerIds", [])),
+        "referencedPlans": [],
+        "name": composer_data.get("name", "Imported conversation"),
+    }
+
+
+def _build_workspace_identifier(ws_dir: Path) -> dict:
+    """Build a workspaceIdentifier dict from a workspace directory.
+
+    Reads workspace.json to get the folder URI and constructs the
+    identifier format used by Cursor 3.0's composer.composerHeaders.
+    """
+    import json as _json
+    ws_json = ws_dir / "workspace.json"
+    ws_hash = ws_dir.name
+    if not ws_json.exists():
+        return {"id": ws_hash}
+
+    try:
+        data = _json.loads(ws_json.read_text())
+    except Exception:
+        return {"id": ws_hash}
+
+    folder_uri = data.get("folder", data.get("workspace", ""))
+    if not folder_uri:
+        return {"id": ws_hash}
+
+    uri_obj: dict = {"$mid": 1}
+    if folder_uri.startswith("file://"):
+        fs_path = folder_uri[len("file://"):].replace("%20", " ")
+        uri_obj["fsPath"] = fs_path
+        uri_obj["path"] = fs_path
+        uri_obj["external"] = folder_uri
+        uri_obj["scheme"] = "file"
+    elif folder_uri.startswith("vscode-remote://"):
+        parts = folder_uri.split("/", 3)
+        authority = parts[2] if len(parts) > 2 else ""
+        fs_path = "/" + parts[3] if len(parts) > 3 else "/"
+        uri_obj["fsPath"] = fs_path
+        uri_obj["path"] = fs_path
+        uri_obj["external"] = folder_uri
+        uri_obj["scheme"] = "vscode-remote"
+        uri_obj["authority"] = authority
+    else:
+        return {"id": ws_hash}
+
+    return {"id": ws_hash, "uri": uri_obj}
+
+
+def _register_in_global_headers(
+    composer_id: str,
+    composer_data: dict,
+    ws_dir: Path,
+) -> None:
+    """Register a conversation in the global composer.composerHeaders index.
+
+    This is the Cursor 3.0+ central index that maps chats to workspaces.
+    Safe to call on any Cursor version — creates the index if absent.
+    """
+    global_db_path = paths.get_global_db_path()
+    global_cdb = db.CursorDB(global_db_path)
+    try:
+        headers = global_cdb.get_json("composer.composerHeaders", table="ItemTable")
+        if headers is None:
+            headers = {"allComposers": []}
+
+        all_composers = headers.get("allComposers", [])
+        existing_ids = {c.get("composerId") for c in all_composers}
+
+        if composer_id not in existing_ids:
+            entry = _build_composer_header_entry(composer_id, composer_data)
+            entry["workspaceIdentifier"] = _build_workspace_identifier(ws_dir)
+            all_composers.append(entry)
+            headers["allComposers"] = all_composers
+            global_cdb.write_json("composer.composerHeaders", headers, table="ItemTable")
+            paths.invalidate_headers_cache()
+    finally:
+        global_cdb.close()
+
+
 def _register_in_workspace(
     composer_id: str,
     composer_data: dict,
@@ -787,8 +887,11 @@ def _register_in_workspace(
     """Register a conversation in a workspace's sidebar.
 
     The conversation data must already exist in the global DB.
-    Handles both Cursor 2.x (allComposers) and 3.0+ (selectedComposerIds
-    + composerChatViewPane) workspace schemas.
+    Handles both Cursor 2.x (allComposers) and 3.0+ schemas.
+
+    For Cursor 3.0+, writes to the global composer.composerHeaders
+    index (the authoritative source) and the workspace's
+    selectedComposerIds.
     """
     ws_db_path = ws_dir / "state.vscdb"
     ws_cdb = db.CursorDB(ws_db_path)
@@ -805,27 +908,8 @@ def _register_in_workspace(
             existing_ids = {c.get("composerId") for c in all_composers}
 
             if composer_id not in existing_ids:
-                all_composers.append({
-                    "type": "head",
-                    "composerId": composer_id,
-                    "lastUpdatedAt": composer_data.get("lastUpdatedAt", composer_data.get("createdAt", 0)),
-                    "createdAt": composer_data.get("createdAt", 0),
-                    "unifiedMode": composer_data.get("unifiedMode", "agent"),
-                    "forceMode": composer_data.get("forceMode", ""),
-                    "hasUnreadMessages": False,
-                    "totalLinesAdded": composer_data.get("totalLinesAdded", 0),
-                    "totalLinesRemoved": composer_data.get("totalLinesRemoved", 0),
-                    "filesChangedCount": composer_data.get("filesChangedCount", 0),
-                    "subtitle": composer_data.get("subtitle", ""),
-                    "isArchived": False,
-                    "isDraft": False,
-                    "isWorktree": False,
-                    "isSpec": False,
-                    "isBestOfNSubcomposer": False,
-                    "numSubComposers": len(composer_data.get("subComposerIds", [])),
-                    "referencedPlans": [],
-                    "name": composer_data.get("name", "Imported conversation"),
-                })
+                entry = _build_composer_header_entry(composer_id, composer_data)
+                all_composers.append(entry)
                 existing["allComposers"] = all_composers
 
         # Both schemas: add to selectedComposerIds
@@ -844,37 +928,13 @@ def _register_in_workspace(
 
         ws_cdb.write_json("composer.composerData", existing, table="ItemTable")
 
-        # Cursor 3.0+: also create a composerChatViewPane entry so the
-        # chat appears as an openable tab in the agents/chat UI
+        # Cursor 3.0+: register in the global headers index
         if is_migrated:
-            _ensure_chat_view_pane(ws_cdb, composer_id)
+            _register_in_global_headers(composer_id, composer_data, ws_dir)
 
         return True
     finally:
         ws_cdb.close()
-
-
-def _ensure_chat_view_pane(ws_cdb: "db.CursorDB", composer_id: str):
-    """Create a composerChatViewPane entry for a chat in a Cursor 3.0+ workspace.
-
-    Mirrors the structure Cursor creates when a chat tab is opened.
-    """
-    import uuid
-
-    pane_id = str(uuid.uuid4())
-    view_key = f"workbench.panel.aichat.view.{composer_id}"
-    pane_data = {view_key: {"collapsed": False, "isHidden": False}}
-
-    ws_cdb.write_json(
-        f"workbench.panel.composerChatViewPane.{pane_id}",
-        pane_data,
-        table="ItemTable",
-    )
-    ws_cdb.write_json(
-        f"workbench.panel.aichat.{pane_id}.numberOfVisibleViews",
-        1,
-        table="ItemTable",
-    )
 
 
 def copy_between_workspaces(

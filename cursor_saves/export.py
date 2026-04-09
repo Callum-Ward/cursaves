@@ -16,14 +16,15 @@ def get_workspace_conversations(
     project_path: str,
     workspace_dir: Optional[Path] = None,
 ) -> list[dict]:
-    """Get the list of conversations for a project from its workspace DB.
+    """Get the list of conversations for a project.
 
     If workspace_dir is provided, only reads from that specific workspace
     (avoids cross-host contamination for SSH workspaces with the same path).
 
-    Supports both Cursor 2.x (allComposers list) and Cursor 3.0+
-    (selectedComposerIds + composerChatViewPane) schemas. For 3.0+
-    workspaces, builds conversation metadata from the global DB.
+    Combines global headers index (Cursor 3.0+), workspace DB allComposers
+    (Cursor 2.x), and per-workspace pane/selection entries to build a
+    complete list. Metadata for IDs only found via pane entries is fetched
+    from the global DB's composerData.
     """
     if workspace_dir is not None:
         ws_dirs = [workspace_dir]
@@ -33,10 +34,24 @@ def get_workspace_conversations(
         return []
 
     all_conversations = []
-    seen_ids = set()
-    ids_needing_global_lookup: list[tuple[str, str]] = []  # (composerId, ws_dir)
+    seen_ids: set[str] = set()
+    ids_needing_metadata: list[tuple[str, str]] = []  # (composerId, ws_dir_str)
+    headers_map = paths._build_global_headers_map()
 
     for ws_dir in ws_dirs:
+        ws_hash = ws_dir.name
+        ws_dir_str = str(ws_dir)
+
+        # Source 1: global headers (has full metadata inline)
+        for entry in headers_map.get(ws_hash, []):
+            cid = entry.get("composerId")
+            if cid and cid not in seen_ids:
+                seen_ids.add(cid)
+                entry_copy = dict(entry)
+                entry_copy["_workspaceDir"] = ws_dir_str
+                all_conversations.append(entry_copy)
+
+        # Source 2: workspace DB
         db_path = ws_dir / "state.vscdb"
         if not db_path.exists():
             continue
@@ -46,29 +61,43 @@ def get_workspace_conversations(
             if not data:
                 continue
 
-            # Cursor 2.x: allComposers has full metadata
-            composers = data.get("allComposers", [])
-            if composers:
-                for c in composers:
-                    cid = c.get("composerId")
-                    if cid and cid not in seen_ids:
-                        seen_ids.add(cid)
-                        c["_workspaceDir"] = str(ws_dir)
-                        all_conversations.append(c)
-            else:
-                # Cursor 3.0+: gather IDs from available sources
-                ws_ids = paths.get_workspace_composer_ids(db_path)
-                for cid in ws_ids:
-                    if cid not in seen_ids:
-                        seen_ids.add(cid)
-                        ids_needing_global_lookup.append((cid, str(ws_dir)))
+            # allComposers (Cursor 2.x — has full metadata)
+            for c in data.get("allComposers", []):
+                cid = c.get("composerId")
+                if cid and cid not in seen_ids:
+                    seen_ids.add(cid)
+                    c["_workspaceDir"] = ws_dir_str
+                    all_conversations.append(c)
 
-    # For Cursor 3.0+ IDs, build metadata from global DB
-    if ids_needing_global_lookup:
+            # selectedComposerIds + pane entries (need metadata lookup)
+            extra_ids: set[str] = set()
+            for cid in data.get("selectedComposerIds", []):
+                if cid and cid not in seen_ids:
+                    extra_ids.add(cid)
+            for cid in data.get("lastFocusedComposerIds", []):
+                if cid and cid not in seen_ids:
+                    extra_ids.add(cid)
+            for key in cdb.list_keys(
+                "workbench.panel.composerChatViewPane.", table="ItemTable"
+            ):
+                pane = cdb.get_json(key, table="ItemTable")
+                if isinstance(pane, dict):
+                    for view_key in pane:
+                        if ".view." in view_key:
+                            cid = view_key.rsplit(".", 1)[-1]
+                            if cid and cid not in seen_ids:
+                                extra_ids.add(cid)
+
+            for cid in extra_ids:
+                seen_ids.add(cid)
+                ids_needing_metadata.append((cid, ws_dir_str))
+
+    # Fetch metadata for IDs found only via pane/selection entries
+    if ids_needing_metadata:
         global_db = paths.get_global_db_path()
         if global_db.exists():
             with db.CursorDB(global_db) as cdb:
-                for cid, ws_dir_str in ids_needing_global_lookup:
+                for cid, ws_dir_str in ids_needing_metadata:
                     cd = cdb.get_json(f"composerData:{cid}")
                     if cd:
                         all_conversations.append({
