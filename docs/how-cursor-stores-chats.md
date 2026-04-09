@@ -227,7 +227,7 @@ Large text blobs (e.g., full file contents pasted into a conversation) are store
 
 ### workspace.json
 
-Each workspace directory contains a `workspace.json` that maps it to a project path:
+Each workspace directory contains a `workspace.json` that maps it to a project path. For single-folder workspaces:
 
 ```json
 {
@@ -242,6 +242,16 @@ For SSH remote workspaces:
   "folder": "vscode-remote://ssh-remote%2Bhostname/path/on/remote"
 }
 ```
+
+For custom workspaces (`.code-workspace` files), Cursor uses a `workspace` key instead of `folder`:
+
+```json
+{
+  "workspace": "file:///Users/callum/Desktop/Projects/my-proj.code-workspace"
+}
+```
+
+The workspace directory name (hash) under `workspaceStorage/` can be used with `cursaves -w <hash>` when the workspace doesn't appear via number or path (e.g. workspace).
 
 ### Workspace IDs are not deterministic
 
