@@ -1,0 +1,40 @@
+name: Check version bump
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check version was bumped
+        run: |
+          PR_VERSION=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
+          MAIN_VERSION=$(git show origin/main:pyproject.toml | grep -m1 '^version' | sed 's/.*"\(.*\)".*/\1/')
+
+          echo "PR version:   $PR_VERSION"
+          echo "Main version: $MAIN_VERSION"
+
+          if [ "$PR_VERSION" = "$MAIN_VERSION" ]; then
+            echo ""
+            echo "::error::Version was not bumped. Please increment the version in both pyproject.toml and cursor_saves/__init__.py"
+            echo ""
+            echo "Users install via 'uv tool install' and update with 'uv tool upgrade cursaves'."
+            echo "The upgrade command compares version numbers — if the version doesn't change,"
+            echo "it won't pull new code even with new commits."
+            exit 1
+          fi
+
+          INIT_VERSION=$(grep '__version__' cursor_saves/__init__.py | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$PR_VERSION" != "$INIT_VERSION" ]; then
+            echo ""
+            echo "::error::Version mismatch: pyproject.toml ($PR_VERSION) != cursor_saves/__init__.py ($INIT_VERSION). Both must match."
+            exit 1
+          fi
+
+          echo "Version bumped from $MAIN_VERSION to $PR_VERSION"
