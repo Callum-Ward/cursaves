@@ -198,13 +198,13 @@ The `sync` command pulls conversations where your local copy is behind the remot
 All commands default to the current working directory as the project path. Use `-w <selector>` to target a workspace by number, hash, or path substring (from `cursaves workspaces`), or `-p /path` to specify a path directly.
 
 | Command        | Description                                                | Modifies Cursor data? |
-| -------------- | ---------------------------------------------------------- | --------------------- | --- | --- |
+| -------------- | ---------------------------------------------------------- | --------------------- |
 | **`sync`**     | **Pull behind + push ahead — one command to stay in sync** | Yes                   |
 | **`push`**     | **Checkpoint + push to remote**                            | No                    |
 | **`push -s`**  | **Interactively select which conversations to push**       | No                    |
-| **`pull`**     | **Pull from remote + import snapshots**                    | Yes                   |     | Yes |
+| **`pull`**     | **Pull from remote + import snapshots**                    | Yes                   |
 | `init`         | Initialize sync (git remote, S3 bucket, etc.)              | No                    |
-| `workspaces`   | List all Cursor workspaces (local + SSH remote)            | No                    |
+| `workspaces`   | List all Cursor workspaces (local, SSH, custom) with hash  | No                    |
 | `list`         | Show conversations for a project                           | No                    |
 | `snapshots`    | List snapshot projects available in ~/.cursaves/           | No                    |
 | `status`       | Compare local conversations vs snapshots                   | No                    |
@@ -215,8 +215,9 @@ All commands default to the current working directory as the project path. Use `
 | `import --all` | Import snapshots (no pull)                                 | Yes                   |
 | `watch`        | Auto-checkpoint and sync in the background                 | No (reads only)       |
 | `copy`         | Copy conversations between workspaces (same machine)       | Yes                   |
+| `doctor`       | Audit chats: find orphaned/lost conversations, recover them | Yes (with `--recover`) |
 
-Most of the time you only need `sync`. Use `push -s` when you want to push specific conversations. Use `repair` if you get "Blob not found" errors after importing. Use `delete` to clean up snapshots you no longer need.
+Most of the time you only need `sync`. Use `push -s` when you want to push specific conversations. Use `repair` if you get "Blob not found" errors after importing. Use `doctor` to find and recover orphaned chats. Use `delete` to clean up snapshots you no longer need.
 
 ### Auto-sync with `watch`
 
