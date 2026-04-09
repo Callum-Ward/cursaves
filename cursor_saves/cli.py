@@ -1687,15 +1687,17 @@ def cmd_doctor(args):
     print(
         f"  ─── Orphaned chats ({len(orphaned)}) ──────────────────────────────────\n"
     )
-    print(f"  {'#':<4} {'Name':<40} {'Msgs':>5}  {'Last Updated'}")
+    print(f"  {'#':<4} {'Name':<36} {'Msgs':>5}  {'Likely Workspace'}")
     print(f"  {'-' * 75}")
 
     for i, chat in enumerate(orphaned, 1):
         name = chat["name"]
-        if len(name) > 38:
-            name = name[:35] + "..."
-        updated = format_timestamp(chat["lastUpdatedAt"])
-        print(f"  {i:<4} {name:<40} {chat['messageCount']:>5}  {updated}")
+        if len(name) > 34:
+            name = name[:31] + "..."
+        ws = chat.get("likelyWorkspace") or "unknown"
+        if len(ws) > 22:
+            ws = ws[:19] + "..."
+        print(f"  {i:<4} {name:<36} {chat['messageCount']:>5}  {ws}")
 
     print()
 

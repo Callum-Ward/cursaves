@@ -1213,6 +1213,14 @@ def doctor_audit() -> dict:
                     "workspace_dir": ws["workspace_dir"],
                 })
 
+    # --- Build workspace-by-path map for orphan matching ---
+    ws_by_path: dict[str, list[dict]] = {}
+    for ws in all_ws:
+        p = ws["path"]
+        if p not in ws_by_path:
+            ws_by_path[p] = []
+        ws_by_path[p].append(ws)
+
     # --- Scan global DB ---
     orphaned = []
     registered_count = 0
@@ -1234,12 +1242,20 @@ def doctor_audit() -> dict:
             elif msgs == 0 and not name:
                 empty_count += 1
             else:
+                best_ws = _find_best_workspace(cid, cd, cdb, ws_by_path)
+                ws_label = None
+                if best_ws:
+                    ws_label = os.path.basename(best_ws["path"])
+                    if best_ws.get("host"):
+                        ws_label += f" ({best_ws['host']})"
+
                 orphaned.append({
                     "composerId": cid,
                     "name": name or "Untitled",
                     "messageCount": msgs,
                     "createdAt": cd.get("createdAt", 0),
                     "lastUpdatedAt": cd.get("lastUpdatedAt", 0),
+                    "likelyWorkspace": ws_label,
                 })
 
     orphaned.sort(key=lambda x: x["messageCount"], reverse=True)

@@ -1,3 +1,3 @@
 """cursaves: Sync Cursor agent chat sessions between machines."""
 
-__version__ = "0.6.4"
+__version__ = "0.6.5"
