@@ -1706,6 +1706,28 @@ def cmd_doctor(args):
         )
 
 
+def cmd_migrate(args):
+    """Migrate old chats to the Cursor 3.0 global index."""
+    from .importer import migrate_to_global_headers
+
+    dry_run = getattr(args, "dry_run", False)
+    force = getattr(args, "force", False)
+
+    if dry_run:
+        print("\n  ─── Dry run: previewing migration ─────────────────────────\n")
+    else:
+        print("\n  ─── Migrating chats to Cursor 3.0 global index ───────────\n")
+
+    migrated, already = migrate_to_global_headers(
+        dry_run=dry_run,
+        force=force,
+    )
+
+    if not dry_run and migrated > 0:
+        from .reload import print_reload_hint
+        print_reload_hint()
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="cursaves",
@@ -1928,6 +1950,19 @@ def main():
     )
     p_doctor.set_defaults(func=cmd_doctor)
 
+    p_migrate = subparsers.add_parser(
+        "migrate", help="Migrate old chats to Cursor 3.0 global index"
+    )
+    p_migrate.add_argument(
+        "--dry-run", action="store_true",
+        help="Show what would be migrated without writing",
+    )
+    p_migrate.add_argument(
+        "--force", action="store_true",
+        help="Skip the Cursor-running check",
+    )
+    p_migrate.set_defaults(func=cmd_migrate)
+
     args = parser.parse_args()
     if not args.command:
         print(
@@ -1956,6 +1991,8 @@ def main():
             "  status                Show synced vs local-only chats\n"
             "  doctor                Audit chats, find orphaned conversations\n"
             "  doctor --recover      Re-register orphaned chats in workspaces\n"
+            "  migrate               Migrate old chats to Cursor 3.0 index\n"
+            "  migrate --dry-run     Preview migration without writing\n"
             "  delete -s             Select which snapshots to delete\n"
             "  delete --all-projects Delete ALL snapshots\n"
             "\n"

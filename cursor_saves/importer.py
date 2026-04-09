@@ -1446,3 +1446,163 @@ def _find_best_workspace(
                 continue
 
     return None
+
+
+# ── Migration ─────────────────────────────────────────────────────────
+
+
+def migrate_to_global_headers(
+    dry_run: bool = False,
+    force: bool = False,
+) -> tuple[int, int]:
+    """Migrate old chats into the Cursor 3.0 global composer.composerHeaders index.
+
+    Scans all workspaces for chats that exist in the old format (allComposers,
+    pane entries, selectedComposerIds) but are missing from the central
+    composer.composerHeaders index. Adds them with the correct
+    workspaceIdentifier so Cursor 3.0 can discover them natively.
+
+    Args:
+        dry_run: If True, only report what would be migrated without writing.
+        force: Skip the Cursor-running check.
+
+    Returns (migrated_count, already_present_count).
+    """
+    if not dry_run and not force and is_cursor_running():
+        print(
+            "WARNING: Cursor is running. Close Cursor FIRST (Cmd+Q / quit),\n"
+            "then run this command, then reopen Cursor.\n"
+            "Use --force to override (not recommended).\n",
+            file=sys.stderr,
+        )
+        return 0, 0
+
+    global_db_path = paths.get_global_db_path()
+    if not global_db_path.exists():
+        print("Global DB not found.", file=sys.stderr)
+        return 0, 0
+
+    # Read the current global headers
+    global_cdb = db.CursorDB(global_db_path)
+    try:
+        headers = global_cdb.get_json("composer.composerHeaders", table="ItemTable")
+    finally:
+        global_cdb.close()
+    if headers is None:
+        headers = {"allComposers": []}
+
+    existing_ids = {
+        c.get("composerId") for c in headers.get("allComposers", [])
+    }
+
+    # Scan all workspaces for chats not in the global index
+    all_ws = paths.list_all_workspaces()
+    to_migrate: list[tuple] = []  # (entry_or_None, cid, ws_dir, ws_identifier)
+    already_present = 0
+
+    for ws in all_ws:
+        ws_dir = ws["workspace_dir"]
+        ws_db_path = ws_dir / "state.vscdb"
+        if not ws_db_path.exists():
+            continue
+
+        local_ids: set[str] = set()
+        local_metadata: dict[str, dict] = {}
+
+        try:
+            with db.CursorDB(ws_db_path) as cdb:
+                data = cdb.get_json("composer.composerData", table="ItemTable")
+                if not data:
+                    continue
+
+                for c in data.get("allComposers", []):
+                    cid = c.get("composerId")
+                    if cid:
+                        local_ids.add(cid)
+                        local_metadata[cid] = c
+
+                for cid in data.get("selectedComposerIds", []):
+                    if cid:
+                        local_ids.add(cid)
+                for cid in data.get("lastFocusedComposerIds", []):
+                    if cid:
+                        local_ids.add(cid)
+
+                for key in cdb.list_keys(
+                    "workbench.panel.composerChatViewPane.", table="ItemTable"
+                ):
+                    pane = cdb.get_json(key, table="ItemTable")
+                    if isinstance(pane, dict):
+                        for view_key in pane:
+                            if ".view." in view_key:
+                                cid = view_key.rsplit(".", 1)[-1]
+                                if cid:
+                                    local_ids.add(cid)
+        except Exception:
+            continue
+
+        ws_identifier = _build_workspace_identifier(ws_dir)
+        for cid in local_ids:
+            if cid in existing_ids:
+                already_present += 1
+                continue
+
+            entry = None
+            if cid in local_metadata:
+                entry = _build_composer_header_entry(cid, local_metadata[cid])
+
+            to_migrate.append((entry, cid, ws_dir, ws_identifier))
+            existing_ids.add(cid)
+
+    if not to_migrate:
+        print(f"All chats already in global index ({already_present} checked).")
+        return 0, already_present
+
+    # Fetch metadata from global DB for entries that need it, skip empty stubs
+    final_entries: list[dict] = []
+    with db.CursorDB(global_db_path) as read_cdb:
+        for entry, cid, ws_dir, ws_identifier in to_migrate:
+            if entry is None:
+                cd = read_cdb.get_json(f"composerData:{cid}")
+                if not cd:
+                    continue
+                msgs = len(cd.get("fullConversationHeadersOnly", []))
+                if msgs == 0 and not cd.get("name"):
+                    continue
+                entry = _build_composer_header_entry(cid, cd)
+
+            entry["workspaceIdentifier"] = ws_identifier
+
+            ws_label = os.path.basename(
+                ws_identifier.get("uri", {}).get("fsPath", ws_dir.name)
+            )
+            name = entry.get("name", "")[:40] or "(unnamed)"
+
+            if dry_run:
+                print(f"  Would migrate: {cid[:12]}... \"{name}\" → {ws_label}")
+
+            final_entries.append(entry)
+
+    if not final_entries:
+        print(f"No chats to migrate ({already_present} already present).")
+        return 0, already_present
+
+    if dry_run:
+        print(f"\n{len(final_entries)} chat(s) would be migrated "
+              f"({already_present} already present).")
+        return len(final_entries), already_present
+
+    backup_path = db.backup_db(global_db_path)
+    print(f"Backed up global DB to {backup_path.name}")
+
+    headers["allComposers"].extend(final_entries)
+    write_cdb = db.CursorDB(global_db_path)
+    try:
+        write_cdb.write_json("composer.composerHeaders", headers, table="ItemTable")
+    finally:
+        write_cdb.close()
+    paths.invalidate_headers_cache()
+
+    print(f"Migrated {len(final_entries)} chat(s) to global index.")
+    print("Restart Cursor to see them in the sidebar.")
+    return len(final_entries), already_present
