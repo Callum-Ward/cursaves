@@ -12,11 +12,11 @@ There are two databases that matter, plus some auxiliary files:
 ~/Library/Application Support/Cursor/User/   (macOS)
 ~/.config/Cursor/User/                        (Linux)
 ├── globalStorage/
-│   └── state.vscdb                           # Global DB -- all conversation content
+│   └── state.vscdb                           # Global DB -- conversation content + central index (3.0+)
 └── workspaceStorage/
     ├── <workspace-id-1>/
     │   ├── workspace.json                    # Maps this workspace to a project path
-    │   └── state.vscdb                       # Workspace DB -- conversation list
+    │   └── state.vscdb                       # Workspace DB -- chat list (2.x) / selected tabs (3.0+)
     ├── <workspace-id-2>/
     │   ├── workspace.json
     │   └── state.vscdb
@@ -50,13 +50,13 @@ The key entry is `composer.composerData` in `ItemTable`. Its value is a JSON obj
 }
 ```
 
-This is what Cursor reads to populate the **sidebar** -- the list of conversations you see when you open a project. It contains metadata only (name, timestamps, mode), not the actual conversation content.
+In Cursor ≤2.6, this is what populates the **sidebar** — the list of conversations you see when you open a project. In Cursor 3.0+, this data is moved to the global DB (see [Cursor 3.0 Migration](#cursor-30-migration-april-2026)). It contains metadata only (name, timestamps, mode), not the actual conversation content.
 
 ### Global DB (shared, large)
 
 **Location:** `globalStorage/state.vscdb`
 
-This single database stores the actual conversation content for **all projects**. It has the same two tables (`ItemTable`, `cursorDiskKV`), but the important data is in `cursorDiskKV`.
+This single database stores the actual conversation content for **all projects**. It has the same two tables (`ItemTable`, `cursorDiskKV`). Conversation data lives in `cursorDiskKV`. In Cursor 3.0+, the central chat-workspace index (`composer.composerHeaders`) lives in `ItemTable`.
 
 The global DB stores five types of entries for each conversation, all keyed by `composerId`:
 
@@ -83,8 +83,9 @@ Open project
 **Cursor 3.0+:**
 ```
 Open project
-  → Cursor uses internal discovery (no allComposers)
-  → Populates sidebar from selectedComposerIds and internal index
+  → Cursor reads composer.composerHeaders from global DB
+  → Filters entries by workspaceIdentifier matching this workspace
+  → Shows them in the sidebar
 ```
 
 **Both versions:**
@@ -199,7 +200,7 @@ On a machine running Cursor 3.0, recently-opened workspaces will have migrated w
 
 ### How cursaves handles this
 
-As of v0.8.1, cursaves combines multiple sources for maximum coverage:
+As of v0.8.2, cursaves combines multiple sources for maximum coverage:
 
 **Discovery (reading):**
 1. `composer.composerHeaders` in global DB (Cursor 3.0+ central index — fast, authoritative for recent chats)
@@ -211,6 +212,10 @@ As of v0.8.1, cursaves combines multiple sources for maximum coverage:
 - **Cursor 2.x** workspaces: append to `allComposers` + `selectedComposerIds` in workspace DB
 - **Cursor 3.0+** workspaces: add to `composer.composerHeaders` in global DB (with `workspaceIdentifier`) + `selectedComposerIds` in workspace DB
 - In both cases, conversation data is written to the global DB identically
+
+**Migration:**
+
+`cursaves migrate` scans all workspaces for chats tracked in the old format that are missing from `composer.composerHeaders`, and adds them with the correct `workspaceIdentifier`. This makes old chats appear in Cursor 3.0's sidebar without needing to manually re-open each one. Use `--dry-run` to preview first.
 
 ## Conversation Data Structure
 
