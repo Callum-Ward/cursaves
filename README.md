@@ -115,7 +115,7 @@ cadfb263-3326-4aff-8887-dcc12f736b11     Feedback on documentation...   agent   
 
 ## Installation
 
-**Requirements:** Python 3.10+, [uv](https://docs.astral.sh/uv/), macOS or Linux, Git (for git backend). Zero required Python dependencies.
+**Requirements:** Python 3.10+, [uv](https://docs.astral.sh/uv/), macOS, Linux, or Windows, Git (for git backend). Zero required Python dependencies.
 
 **Tested with:** Cursor 2.6–3.0 (supports both old and new chat storage formats)
 
@@ -248,6 +248,7 @@ Data locations:
 
 - macOS: `~/Library/Application Support/Cursor/User/`
 - Linux: `~/.config/Cursor/User/`
+- Windows: `%APPDATA%\Cursor\User\`
 
 Notably, **chat data is always stored on the machine running Cursor's UI**, even when connected to a remote host via SSH. This is why switching machines means losing your conversation context.
 
@@ -365,7 +366,7 @@ cursaves pull -w 497e8ab0    # By hash
 
 If you use a VS Code/Cursor custom workspace (e.g. `my-proj.code-workspace`), it may not appear in `cursaves workspaces` with a recognizable path. In that case:
 
-1. Find the workspace hash: browse `~/Library/Application Support/Cursor/User/workspaceStorage/` (macOS) or `~/.config/Cursor/User/workspaceStorage/` (Linux) and locate the directory containing your chats.
+1. Find the workspace hash: browse `~/Library/Application Support/Cursor/User/workspaceStorage/` (macOS), `~/.config/Cursor/User/workspaceStorage/` (Linux), or `%APPDATA%\Cursor\User\workspaceStorage\` (Windows) and locate the directory containing your chats.
 2. Use the hash as the workspace selector: `cursaves push -w <hash>` or `cursaves pull -w <hash>`.
 
 `cursaves workspaces` now shows custom workspaces as `(workspace)` and includes a Hash column you can use.

@@ -108,7 +108,12 @@ def is_cursor_running() -> bool:
     characters. Instead we parse `ps -axo args` and look for the main
     Cursor executable while excluding helpers, crash handlers, and the
     macOS CursorUIViewService system process.
+
+    On Windows, uses tasklist to check for Cursor.exe.
     """
+    import platform
+    if platform.system() == "Windows":
+        return _is_cursor_running_windows()
     try:
         result = subprocess.run(
             ["ps", "-axo", "args"],
@@ -124,6 +129,25 @@ def is_cursor_running() -> bool:
                 return True
         return False
     except FileNotFoundError:
+        return False
+
+
+def _is_cursor_running_windows() -> bool:
+    """Check if Cursor.exe is running on Windows."""
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq Cursor.exe", "/NH"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return False
+        for line in result.stdout.splitlines():
+            if "Cursor.exe" in line:
+                return True
+        return False
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
 
@@ -170,7 +194,13 @@ def find_or_create_workspace(project_path: str) -> Path:
     ws_dir.mkdir(parents=True, exist_ok=True)
 
     # Create workspace.json
-    folder_uri = "file://" + os.path.normpath(project_path)
+    norm_path = os.path.normpath(project_path)
+    import platform
+    if platform.system() == "Windows":
+        norm_path = norm_path.replace("\\", "/")
+        if not norm_path.startswith("/"):
+            norm_path = "/" + norm_path
+    folder_uri = "file://" + norm_path
     ws_json = ws_dir / "workspace.json"
     ws_json.write_text(json.dumps({"folder": folder_uri}))
 
@@ -829,8 +859,14 @@ def _build_workspace_identifier(ws_dir: Path) -> dict:
     uri_obj: dict = {"$mid": 1}
     if folder_uri.startswith("file://"):
         fs_path = folder_uri[len("file://"):].replace("%20", " ")
+        import platform
+        if platform.system() == "Windows" and fs_path.startswith("/") and len(fs_path) > 2 and fs_path[2] == ":":
+            fs_path = fs_path[1:]
+        # Normalize slashes for Windows fsPath
+        if platform.system() == "Windows":
+            fs_path = fs_path.replace("/", "\\")
         uri_obj["fsPath"] = fs_path
-        uri_obj["path"] = fs_path
+        uri_obj["path"] = fs_path.replace("\\", "/") # VS Code path is always forward slashes
         uri_obj["external"] = folder_uri
         uri_obj["scheme"] = "file"
     elif folder_uri.startswith("vscode-remote://"):

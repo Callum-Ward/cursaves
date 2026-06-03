@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import subprocess
 import sys
 from abc import ABC, abstractmethod
@@ -19,7 +20,12 @@ from pathlib import Path
 from typing import Optional
 
 
-_CONFIG_PATH = Path.home() / ".config" / "cursaves" / "config.json"
+def _get_config_path() -> Path:
+    if platform.system() == "Windows":
+        return Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "cursaves" / "config.json"
+    return Path.home() / ".config" / "cursaves" / "config.json"
+
+_CONFIG_PATH = _get_config_path()
 
 
 # ── Abstract base ────────────────────────────────────────────────────────
@@ -222,7 +228,7 @@ class S3Backend(SyncBackend):
 
     Requires ``boto3`` — install with ``pip install cursaves[s3]``.
 
-    Configuration (in ~/.config/cursaves/config.json)::
+    Configuration (in ~/.config/cursaves/config.json (or %APPDATA%/cursaves/config.json on Windows))::
 
         {
             "backend": "s3",
@@ -355,7 +361,7 @@ class S3Backend(SyncBackend):
 
 
 def load_config() -> dict:
-    """Load cursaves config from ~/.config/cursaves/config.json."""
+    """Load cursaves config from ~/.config/cursaves/config.json (or %APPDATA%/cursaves/config.json on Windows)."""
     if _CONFIG_PATH.exists():
         try:
             return json.loads(_CONFIG_PATH.read_text())

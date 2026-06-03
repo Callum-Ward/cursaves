@@ -15,18 +15,22 @@ def get_cursor_user_dir() -> Path:
 
     macOS:  ~/Library/Application Support/Cursor/User
     Linux:  ~/.config/Cursor/User
+    Windows: %APPDATA%\\Cursor\\User
     """
     system = platform.system()
     if system == "Darwin":
         base = Path.home() / "Library" / "Application Support" / "Cursor" / "User"
     elif system == "Linux":
         base = Path.home() / ".config" / "Cursor" / "User"
+    elif system == "Windows":
+        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "Cursor" / "User"
     else:
         print(
             f"Error: Unsupported platform '{system}'.\n"
-            f"cursaves supports macOS and Linux.\n"
+            f"cursaves supports macOS, Linux, and Windows.\n"
             f"On macOS, Cursor data is at ~/Library/Application Support/Cursor/User/\n"
-            f"On Linux, Cursor data is at ~/.config/Cursor/User/",
+            f"On Linux, Cursor data is at ~/.config/Cursor/User/\n"
+            f"On Windows, Cursor data is at %APPDATA%\\Cursor\\User\\",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -67,8 +71,8 @@ def sanitize_project_path(project_path: str) -> str:
 
     /Users/callum/Desktop/Projects/myrepo -> Users-callum-Desktop-Projects-myrepo
     """
-    # Strip leading slash and replace / with -
-    return project_path.strip("/").replace("/", "-")
+    # Strip leading slash/backslash and replace path separators with -
+    return project_path.strip("/\\").replace("/", "-").replace("\\", "-")
 
 
 def _decode_ssh_host(host: str) -> str:
@@ -117,6 +121,11 @@ def find_workspace_dirs_for_project(project_path: str) -> list[Path]:
                 folder_path = folder_uri[len("file://") :]
                 # URL-decode common escapes
                 folder_path = folder_path.replace("%20", " ")
+                # Handle Windows paths like /c:/Users/...
+                if platform.system() == "Windows" and folder_path.startswith("/") and len(folder_path) > 2 and folder_path[2] == ":":
+                    folder_path = folder_path[1:]
+                if platform.system() == "Windows" and folder_path.startswith("/") and len(folder_path) > 2 and folder_path[2] == ":":
+                    folder_path = folder_path[1:]
             elif folder_uri.startswith("vscode-remote://"):
                 # SSH remote workspace - extract the path portion
                 # Format: vscode-remote://ssh-remote%2B<host>/<path>
@@ -194,6 +203,8 @@ def list_all_workspaces() -> list[dict]:
                     folder_uri = ws_uri
                     folder_path = ws_uri[len("file://") :]
                     folder_path = folder_path.replace("%20", " ")
+                    if platform.system() == "Windows" and folder_path.startswith("/") and len(folder_path) > 2 and folder_path[2] == ":":
+                        folder_path = folder_path[1:]
                     ws_type = "workspace"
                 else:
                     continue
@@ -205,6 +216,8 @@ def list_all_workspaces() -> list[dict]:
                 if folder_uri.startswith("file://"):
                     folder_path = folder_uri[len("file://") :]
                     folder_path = folder_path.replace("%20", " ")
+                    if platform.system() == "Windows" and folder_path.startswith("/") and len(folder_path) > 2 and folder_path[2] == ":":
+                        folder_path = folder_path[1:]
                 elif folder_uri.startswith("vscode-remote://"):
                     ws_type = "ssh"
                     # Format: vscode-remote://ssh-remote%2B<host>/<path>
@@ -412,8 +425,10 @@ def resolve_workspace(selector: str) -> Optional[dict]:
                 return ws
 
     # Try as path substring
+    norm_selector = selector.replace("\\", "/")
     for ws in workspaces:
-        if selector in ws["path"]:
+        norm_path = ws["path"].replace("\\", "/")
+        if norm_selector in norm_path:
             return ws
 
     return None
@@ -434,16 +449,26 @@ def get_snapshots_dir() -> Path:
     return snapshots
 
 
+def _get_config_dir() -> Path:
+    """Return the cursaves config directory.
+
+    Linux/macOS: ~/.config/cursaves/
+    Windows: %APPDATA%/cursaves/
+    """
+    if platform.system() == "Windows":
+        return Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "cursaves"
+    return Path.home() / ".config" / "cursaves"
+
+
 def is_sync_repo_initialized() -> bool:
     """Check if a sync backend has been configured (git repo or cloud)."""
     sync_dir = get_sync_dir()
     if (sync_dir / ".git").exists():
         return True
     # Check for non-git backend config
-    config_path = Path.home() / ".config" / "cursaves" / "config.json"
+    config_path = _get_config_dir() / "config.json"
     if config_path.exists():
         try:
-            import json
             cfg = json.loads(config_path.read_text())
             return cfg.get("backend") in ("s3", "azure")
         except Exception:
