@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
+from urllib.parse import unquote
 
 
 def get_cursor_user_dir() -> Path:
@@ -93,6 +94,19 @@ def _decode_ssh_host(host: str) -> str:
     return host
 
 
+def _decode_file_uri(uri: str) -> str:
+    """Decode a file:// URI to a local filesystem path.
+
+    Handles URL-encoded characters (%20 -> space, %3A -> colon, etc.)
+    and strips the leading slash on Windows drive paths (/C:/... -> C:/...).
+    """
+    path = unquote(uri[len("file://"):])
+    # On Windows, file:///C:/... becomes /C:/... after stripping scheme
+    if platform.system() == "Windows" and len(path) > 2 and path[0] == "/" and path[2] == ":":
+        path = path[1:]
+    return path
+
+
 def find_workspace_dirs_for_project(project_path: str) -> list[Path]:
     """Find all workspace directories that map to a given project path.
 
@@ -105,6 +119,9 @@ def find_workspace_dirs_for_project(project_path: str) -> list[Path]:
 
     # Normalise the target path for comparison
     target = os.path.normpath(os.path.expanduser(project_path))
+    # On Windows, paths are case-insensitive
+    if platform.system() == "Windows":
+        target = target.lower()
 
     matches = []
     for ws_dir in ws_storage.iterdir():
@@ -118,14 +135,7 @@ def find_workspace_dirs_for_project(project_path: str) -> list[Path]:
             folder_uri = data.get("folder", "")
             # Handle file:// URIs
             if folder_uri.startswith("file://"):
-                folder_path = folder_uri[len("file://") :]
-                # URL-decode common escapes
-                folder_path = folder_path.replace("%20", " ")
-                # Handle Windows paths like /c:/Users/...
-                if platform.system() == "Windows" and folder_path.startswith("/") and len(folder_path) > 2 and folder_path[2] == ":":
-                    folder_path = folder_path[1:]
-                if platform.system() == "Windows" and folder_path.startswith("/") and len(folder_path) > 2 and folder_path[2] == ":":
-                    folder_path = folder_path[1:]
+                folder_path = _decode_file_uri(folder_uri)
             elif folder_uri.startswith("vscode-remote://"):
                 # SSH remote workspace - extract the path portion
                 # Format: vscode-remote://ssh-remote%2B<host>/<path>
@@ -137,7 +147,10 @@ def find_workspace_dirs_for_project(project_path: str) -> list[Path]:
             else:
                 continue
 
-            if os.path.normpath(folder_path) == target:
+            norm_folder = os.path.normpath(folder_path)
+            if platform.system() == "Windows":
+                norm_folder = norm_folder.lower()
+            if norm_folder == target:
                 matches.append(ws_dir)
         except (json.JSONDecodeError, OSError):
             continue
@@ -201,10 +214,7 @@ def list_all_workspaces() -> list[dict]:
                 ws_uri = data["workspace"]
                 if ws_uri.startswith("file://"):
                     folder_uri = ws_uri
-                    folder_path = ws_uri[len("file://") :]
-                    folder_path = folder_path.replace("%20", " ")
-                    if platform.system() == "Windows" and folder_path.startswith("/") and len(folder_path) > 2 and folder_path[2] == ":":
-                        folder_path = folder_path[1:]
+                    folder_path = _decode_file_uri(ws_uri)
                     ws_type = "workspace"
                 else:
                     continue
@@ -214,10 +224,7 @@ def list_all_workspaces() -> list[dict]:
                     continue
 
                 if folder_uri.startswith("file://"):
-                    folder_path = folder_uri[len("file://") :]
-                    folder_path = folder_path.replace("%20", " ")
-                    if platform.system() == "Windows" and folder_path.startswith("/") and len(folder_path) > 2 and folder_path[2] == ":":
-                        folder_path = folder_path[1:]
+                    folder_path = _decode_file_uri(folder_uri)
                 elif folder_uri.startswith("vscode-remote://"):
                     ws_type = "ssh"
                     # Format: vscode-remote://ssh-remote%2B<host>/<path>
@@ -228,6 +235,7 @@ def list_all_workspaces() -> list[dict]:
                         host = authority.split("+", 1)[1]
                     # Decode the host if it's hex-encoded JSON (e.g. {"hostName":"core"})
                     if host:
+                        host = unquote(host)
                         host = _decode_ssh_host(host)
                     parts = folder_uri.split("/", 3)
                     if len(parts) >= 4:

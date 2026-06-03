@@ -746,10 +746,10 @@ def import_from_snapshot_dir(
         print(f"Importing {sf.name}...")
         if import_snapshot(sf, target_project_path, ws_dir, skip_backup=True):
             success += 1
-            print(f"  OK")
+            print("  OK")
         else:
             failure += 1
-            print(f"  FAILED")
+            print("  FAILED")
 
     return success, failure
 
@@ -789,7 +789,7 @@ def import_all_snapshots(
     if not project_snapshots:
         project_id = paths.get_project_identifier(target_project_path)
         print(f"No snapshots found for project '{project_id}'", file=sys.stderr)
-        print(f"Run 'cursaves snapshots' to see available snapshot projects.", file=sys.stderr)
+        print("Run 'cursaves snapshots' to see available snapshot projects.", file=sys.stderr)
         return 0, 0
 
     project_id = paths.get_project_identifier(target_project_path)

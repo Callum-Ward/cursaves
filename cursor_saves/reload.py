@@ -125,7 +125,6 @@ def _reload_linux() -> bool:
 def _reload_windows() -> bool:
     """Use PowerShell and SendKeys to send Ctrl+Shift+P and type the reload command."""
     try:
-        import time
 
         # Check if Cursor is running
         check = subprocess.run(
