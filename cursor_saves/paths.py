@@ -557,6 +557,10 @@ def format_workspace_display(ws: dict, include_path: bool = True) -> str:
 # ── Project identification ────────────────────────────────────────────
 
 
+_git_remote_cache: dict[str, Optional[str]] = {}
+_project_id_cache: dict[str, str] = {}
+
+
 def get_project_identifier(project_path: str) -> str:
     """Get a stable identifier for a project, used as the snapshot subdirectory.
 
@@ -567,26 +571,42 @@ def get_project_identifier(project_path: str) -> str:
       - Same repo under different local names (bob/ vs alice/) → same identifier
       - Different repos that happen to share a name → different identifiers
     """
+    normalized_path = os.path.normpath(project_path)
+    if normalized_path in _project_id_cache:
+        return _project_id_cache[normalized_path]
+
     remote_url = _get_git_remote_url(project_path)
     if remote_url:
-        return _normalize_remote_url(remote_url)
-    return os.path.basename(os.path.normpath(project_path))
+        ident = _normalize_remote_url(remote_url)
+    else:
+        ident = os.path.basename(normalized_path)
+
+    _project_id_cache[normalized_path] = ident
+    return ident
 
 
 def _get_git_remote_url(project_path: str) -> Optional[str]:
     """Get the git remote origin URL for a project, if any."""
+    normalized_path = os.path.normpath(project_path)
+    if normalized_path in _git_remote_cache:
+        return _git_remote_cache[normalized_path]
+
+    url = None
     try:
         result = subprocess.run(
             ["git", "-C", project_path, "config", "--get", "remote.origin.url"],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
         if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
+            url = result.stdout.strip()
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
-    return None
+
+    _git_remote_cache[normalized_path] = url
+    return url
 
 
 def _normalize_remote_url(url: str) -> str:

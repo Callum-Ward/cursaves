@@ -16,8 +16,9 @@ class CursorDB:
     the original file and require Cursor to be closed.
     """
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, no_copy: bool = True):
         self.db_path = db_path
+        self.no_copy = no_copy
         self._tmp_path: Optional[Path] = None
         self._conn: Optional[sqlite3.Connection] = None
 
@@ -28,6 +29,20 @@ class CursorDB:
 
         if not self.db_path.exists():
             raise FileNotFoundError(f"Database not found: {self.db_path}")
+
+        # Try to connect directly in read-only and lock-free mode for speed
+        if self.no_copy:
+            try:
+                # Use SQLite URI with mode=ro and nolock=1 to prevent locking conflicts
+                db_uri = f"file:{self.db_path.as_posix()}?mode=ro&nolock=1"
+                conn = sqlite3.connect(db_uri, uri=True)
+                # Verify connection works by running a simple query
+                conn.execute("SELECT 1").fetchone()
+                self._conn = conn
+                return self._conn
+            except sqlite3.OperationalError:
+                # Direct connect failed (e.g. URI support issues), fallback to copy method
+                pass
 
         # Copy the main db file and any WAL/SHM files
         tmp_dir = tempfile.mkdtemp(prefix="cursaves-")

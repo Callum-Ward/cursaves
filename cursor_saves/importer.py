@@ -118,7 +118,8 @@ def is_cursor_running() -> bool:
         result = subprocess.run(
             ["ps", "-axo", "args"],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if result.returncode != 0:
             return False
@@ -133,22 +134,74 @@ def is_cursor_running() -> bool:
 
 
 def _is_cursor_running_windows() -> bool:
-    """Check if Cursor.exe is running on Windows."""
-    try:
-        result = subprocess.run(
-            ["tasklist", "/FI", "IMAGENAME eq Cursor.exe", "/NH"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode != 0:
+    """Check if Cursor.exe is running on Windows using ctypes (extremely fast)."""
+    import ctypes
+    from ctypes import wintypes
+
+    def fallback():
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq Cursor.exe", "/NH"],
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+            )
+            if result.returncode != 0:
+                return False
+            for line in result.stdout.splitlines():
+                if "Cursor.exe" in line:
+                    return True
             return False
-        for line in result.stdout.splitlines():
-            if "Cursor.exe" in line:
-                return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+
+    try:
+        # Load Win32 API DLLs
+        psapi = ctypes.WinDLL("psapi.dll")
+        kernel32 = ctypes.WinDLL("kernel32.dll")
+        
+        PROCESS_QUERY_INFORMATION = 0x0400
+        PROCESS_VM_READ = 0x0010
+        
+        EnumProcesses = psapi.EnumProcesses
+        EnumProcesses.argtypes = [ctypes.POINTER(wintypes.DWORD), wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+        EnumProcesses.restype = wintypes.BOOL
+        
+        OpenProcess = kernel32.OpenProcess
+        OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        OpenProcess.restype = wintypes.HANDLE
+        
+        GetModuleBaseName = psapi.GetModuleBaseNameW
+        GetModuleBaseName.argtypes = [wintypes.HANDLE, wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD]
+        GetModuleBaseName.restype = wintypes.DWORD
+        
+        CloseHandle = kernel32.CloseHandle
+        CloseHandle.argtypes = [wintypes.HANDLE]
+        CloseHandle.restype = wintypes.BOOL
+
+        arr_size = 2048
+        pids = (wintypes.DWORD * arr_size)()
+        cb_needed = wintypes.DWORD()
+        if not EnumProcesses(pids, ctypes.sizeof(pids), ctypes.byref(cb_needed)):
+            return fallback()
+
+        num_pids = cb_needed.value // ctypes.sizeof(wintypes.DWORD)
+        for i in range(num_pids):
+            pid = pids[i]
+            if pid == 0:
+                continue
+            h_process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
+            if h_process:
+                buf = ctypes.create_unicode_buffer(260)
+                if GetModuleBaseName(h_process, None, buf, ctypes.sizeof(buf)):
+                    if buf.value.lower() == "cursor.exe":
+                        CloseHandle(h_process)
+                        return True
+                CloseHandle(h_process)
         return False
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+    except Exception:
+        return fallback()
 
 
 _SKIP_REWRITE_KEYS = frozenset({"conversationState"})

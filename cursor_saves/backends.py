@@ -99,7 +99,10 @@ class GitBackend(SyncBackend):
                 push_result = subprocess.run(
                     ["git", "push", "-u", "origin", "main"],
                     cwd=str(self.sync_dir),
-                    capture_output=True, text=True, timeout=120,
+                    capture_output=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=1200,
                 )
                 if push_result.returncode != 0:
                     print(f"  Push failed: {push_result.stderr.strip()}", file=sys.stderr)
@@ -113,7 +116,9 @@ class GitBackend(SyncBackend):
         try:
             result = subprocess.run(
                 ["git", "remote"],
-                capture_output=True, text=True,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
                 cwd=str(self.sync_dir),
             )
             return result.returncode == 0 and result.stdout.strip() != ""
@@ -149,7 +154,10 @@ class GitBackend(SyncBackend):
             ls_remote = subprocess.run(
                 ["git", "ls-remote", "--heads", "origin"],
                 cwd=str(self.sync_dir),
-                capture_output=True, text=True, timeout=30,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
             )
             if ls_remote.returncode == 0 and not ls_remote.stdout.strip():
                 # Remote is completely empty, nothing to fetch or reset to
@@ -158,7 +166,10 @@ class GitBackend(SyncBackend):
             fetch = subprocess.run(
                 ["git", "fetch", "--depth", "1", "origin"],
                 cwd=str(self.sync_dir),
-                capture_output=True, text=True, timeout=180,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=600,
             )
             if fetch.returncode != 0:
                 # Still failed?
@@ -217,7 +228,9 @@ class GitBackend(SyncBackend):
         result = subprocess.run(
             ["git", "remote", "get-url", "origin"],
             cwd=str(self.sync_dir),
-            capture_output=True, text=True,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if result.returncode == 0:
             subprocess.run(
