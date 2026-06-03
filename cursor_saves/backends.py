@@ -145,12 +145,23 @@ class GitBackend(SyncBackend):
             return True
 
         try:
+            # Check if remote is completely empty
+            ls_remote = subprocess.run(
+                ["git", "ls-remote", "--heads", "origin"],
+                cwd=str(self.sync_dir),
+                capture_output=True, text=True, timeout=30,
+            )
+            if ls_remote.returncode == 0 and not ls_remote.stdout.strip():
+                # Remote is completely empty, nothing to fetch or reset to
+                return True
+
             fetch = subprocess.run(
                 ["git", "fetch", "--depth", "1", "origin"],
                 cwd=str(self.sync_dir),
                 capture_output=True, text=True, timeout=180,
             )
             if fetch.returncode != 0:
+                # Still failed?
                 return False
 
             subprocess.run(
