@@ -115,7 +115,7 @@ cadfb263-3326-4aff-8887-dcc12f736b11     Feedback on documentation...   agent   
 
 ## Installation
 
-**Requirements:** Python 3.10+, [uv](https://docs.astral.sh/uv/), macOS or Linux, Git (for git backend). Zero required Python dependencies.
+**Requirements:** Python 3.10+, [uv](https://docs.astral.sh/uv/), macOS, Linux, or Windows, Git (for git backend; [Git for Windows](https://git-scm.com/download/win) on Windows). Zero required Python dependencies.
 
 **Tested with:** Cursor 2.6–3.0 (supports both old and new chat storage formats)
 
@@ -321,6 +321,28 @@ This also works with `-s` to selectively pick which conversations to copy, and w
 
 No remote repo is needed for this — `cursaves init` (without `--remote`) is enough for local-only use.
 
+### Custom Cursor profiles
+
+If you launch Cursor with a custom profile, point `cursaves` at that profile's data root before running commands:
+
+```powershell
+# Cursor launched with:
+# C:\Users\user\AppData\Local\Programs\cursor\Cursor.exe --user-data-dir="C:\Cursor_Work_Profile"
+
+$env:CURSAVES_CURSOR_DATA_DIR = "C:\Cursor_Work_Profile"
+cursaves workspaces
+cursaves pull -p C:\path\to\project
+```
+
+You can also point directly at the profile's `User` directory:
+
+```powershell
+$env:CURSAVES_CURSOR_USER_DIR = "C:\Cursor_Work_Profile\User"
+cursaves pull -s
+```
+
+Unset the variable to go back to the default Cursor profile.
+
 ### SSH remote projects
 
 When you connect to a remote server via Cursor's SSH feature, **chats are stored on your local machine**, not on the remote server. This means:
@@ -365,7 +387,7 @@ cursaves pull -w 497e8ab0    # By hash
 
 If you use a VS Code/Cursor custom workspace (e.g. `my-proj.code-workspace`), it may not appear in `cursaves workspaces` with a recognizable path. In that case:
 
-1. Find the workspace hash: browse `~/Library/Application Support/Cursor/User/workspaceStorage/` (macOS) or `~/.config/Cursor/User/workspaceStorage/` (Linux) and locate the directory containing your chats.
+1. Find the workspace hash: browse `~/Library/Application Support/Cursor/User/workspaceStorage/` (macOS), `~/.config/Cursor/User/workspaceStorage/` (Linux), or `%APPDATA%\Cursor\User\workspaceStorage\` (Windows) and locate the directory containing your chats.
 2. Use the hash as the workspace selector: `cursaves push -w <hash>` or `cursaves pull -w <hash>`.
 
 `cursaves workspaces` now shows custom workspaces as `(workspace)` and includes a Hash column you can use.
@@ -388,9 +410,11 @@ The daemon handles checkpoint + git push/pull automatically. When you switch mac
       <composer-id>.json.gz    # Self-contained conversation snapshot
   .git/                        # Present when using git backend
 
-~/.config/cursaves/
+~/.config/cursaves/            # macOS/Linux config
   config.json                  # Backend configuration (git, s3, etc.)
   sync_state.json              # Tracks handled diverged snapshots
+
+%APPDATA%/cursaves/            # Windows config (same files as above)
 
 ~/.local/bin/cursaves          # Global CLI tool (installed via uv)
 

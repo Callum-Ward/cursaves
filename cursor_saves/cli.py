@@ -195,15 +195,24 @@ def cmd_workspaces(args):
 def _is_remote_path(path: str, source_machine: str) -> bool:
     """Check if a path looks like it came from an SSH remote session."""
     import platform
-    
+    from pathlib import Path as PathLib
+
     # If path doesn't exist locally, it's likely remote
     if not os.path.exists(path):
         return True
-    
-    # On Mac, local paths start with /Users
-    if platform.system() == "Darwin" and not path.startswith("/Users"):
+
+    system = platform.system()
+    if system == "Darwin" and not path.startswith("/Users"):
         return True
-    
+    if system == "Windows":
+        p = PathLib(path)
+        # Local Windows paths have a drive letter or are UNC paths
+        if p.drive or path.startswith("\\\\"):
+            return False
+        # POSIX-style paths on Windows are likely from a remote session
+        if path.startswith("/"):
+            return True
+
     return False
 
 
@@ -713,9 +722,9 @@ def _push_ahead(sync_dir: Path, auto: bool = False, backend: Optional[SyncBacken
     if not auto:
         if backend.has_remote():
             snapshots_dir = paths.get_snapshots_dir()
-            print("Syncing with remote...", end="", flush=True)
+            print("Syncing with remote...", flush=True)
             if backend.pull(snapshots_dir):
-                print(" done")
+                print("  done")
             else:
                 print(" failed (continuing with local state)", file=sys.stderr)
 
@@ -778,7 +787,7 @@ def _push_ahead(sync_dir: Path, auto: bool = False, backend: Optional[SyncBacken
 
 def _get_sync_state_path() -> Path:
     """Path for local sync state (outside the git repo to survive git clean)."""
-    return Path.home() / ".config" / "cursaves" / "sync_state.json"
+    return paths.get_config_dir() / "sync_state.json"
 
 
 def _load_sync_state() -> dict:
@@ -938,9 +947,9 @@ def cmd_sync(args):
 
     # Step 1: Pull remote → local snapshots
     if backend.has_remote():
-        print("Syncing with remote...", end="", flush=True)
+        print("Syncing with remote...", flush=True)
         if backend.pull(snapshots_dir):
-            print(" done")
+            print("  done")
         else:
             print(" failed", file=sys.stderr)
             return
@@ -1062,9 +1071,9 @@ def _backend_pull() -> bool:
         print("No remote configured, importing from local snapshots only.")
         return True
 
-    print("Syncing with remote...", end="", flush=True)
+    print("Syncing with remote...", flush=True)
     if backend.pull(snapshots_dir):
-        print(" done")
+        print("  done")
         return True
     else:
         print(" failed", file=sys.stderr)

@@ -102,13 +102,21 @@ def read_snapshot_meta(snapshot_path: Path) -> dict:
 
 
 def is_cursor_running() -> bool:
-    """Check if the main Cursor app process is running.
+    """Check if the main Cursor app process is running."""
+    import platform
 
-    On macOS, pgrep -x fails because the comm field is truncated to 16
-    characters. Instead we parse `ps -axo args` and look for the main
-    Cursor executable while excluding helpers, crash handlers, and the
-    macOS CursorUIViewService system process.
-    """
+    system = platform.system()
+    if system == "Darwin":
+        return _is_cursor_running_macos()
+    if system == "Windows":
+        return _is_cursor_running_windows()
+    if system == "Linux":
+        return _is_cursor_running_linux()
+    return False
+
+
+def _is_cursor_running_macos() -> bool:
+    """macOS: parse ps output for the main Cursor executable."""
     try:
         result = subprocess.run(
             ["ps", "-axo", "args"],
@@ -125,6 +133,47 @@ def is_cursor_running() -> bool:
         return False
     except FileNotFoundError:
         return False
+
+
+def _is_cursor_running_windows() -> bool:
+    """Windows: look for Cursor.exe in tasklist output."""
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq Cursor.exe", "/NH"],
+            capture_output=True,
+            text=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0:
+            return False
+        return "Cursor.exe" in result.stdout
+    except FileNotFoundError:
+        return False
+
+
+def _is_cursor_running_linux() -> bool:
+    """Linux: pgrep for cursor process (case-insensitive name)."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-xi", "cursor"],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def cursor_quit_hint() -> str:
+    """Platform-specific instruction for fully quitting Cursor."""
+    import platform
+
+    system = platform.system()
+    if system == "Darwin":
+        return "Cmd+Q"
+    if system == "Windows":
+        return "File → Exit or Alt+F4"
+    return "quit"
 
 
 _SKIP_REWRITE_KEYS = frozenset({"conversationState"})
@@ -170,7 +219,7 @@ def find_or_create_workspace(project_path: str) -> Path:
     ws_dir.mkdir(parents=True, exist_ok=True)
 
     # Create workspace.json
-    folder_uri = "file://" + os.path.normpath(project_path)
+    folder_uri = paths.path_to_file_uri(project_path)
     ws_json = ws_dir / "workspace.json"
     ws_json.write_text(json.dumps({"folder": folder_uri}))
 
@@ -681,7 +730,7 @@ def import_from_snapshot_dir(
     """
     if not force and is_cursor_running():
         print(
-            "WARNING: Cursor is running. Close Cursor FIRST (Cmd+Q / quit),\n"
+            f"WARNING: Cursor is running. Close Cursor FIRST ({cursor_quit_hint()}),\n"
             "then import, then reopen Cursor. If you import while Cursor is\n"
             "running, Cursor will overwrite the sidebar registration on exit\n"
             "and the imported chats will disappear.\n"
@@ -742,7 +791,7 @@ def import_all_snapshots(
     """
     if not force and is_cursor_running():
         print(
-            "WARNING: Cursor is running. Close Cursor FIRST (Cmd+Q / quit),\n"
+            f"WARNING: Cursor is running. Close Cursor FIRST ({cursor_quit_hint()}),\n"
             "then import, then reopen Cursor. If you import while Cursor is\n"
             "running, Cursor will overwrite the sidebar registration on exit\n"
             "and the imported chats will disappear.\n"
@@ -828,7 +877,9 @@ def _build_workspace_identifier(ws_dir: Path) -> dict:
 
     uri_obj: dict = {"$mid": 1}
     if folder_uri.startswith("file://"):
-        fs_path = folder_uri[len("file://"):].replace("%20", " ")
+        fs_path = paths.file_uri_to_path(folder_uri)
+        if fs_path is None:
+            return {"id": ws_hash}
         uri_obj["fsPath"] = fs_path
         uri_obj["path"] = fs_path
         uri_obj["external"] = folder_uri
@@ -954,7 +1005,7 @@ def copy_between_workspaces(
     """
     if not force and is_cursor_running():
         print(
-            "WARNING: Cursor is running. Close Cursor FIRST (Cmd+Q / quit),\n"
+            f"WARNING: Cursor is running. Close Cursor FIRST ({cursor_quit_hint()}),\n"
             "then run this command, then reopen Cursor.\n"
             "Use --force to override (not recommended).\n",
             file=sys.stderr,
@@ -1332,7 +1383,7 @@ def doctor_recover(
     """
     if not force and is_cursor_running():
         print(
-            "WARNING: Cursor is running. Close Cursor FIRST (Cmd+Q / quit),\n"
+            f"WARNING: Cursor is running. Close Cursor FIRST ({cursor_quit_hint()}),\n"
             "then run this command, then reopen Cursor.\n"
             "Use --force to override (not recommended).\n",
             file=sys.stderr,
@@ -1470,7 +1521,7 @@ def migrate_to_global_headers(
     """
     if not dry_run and not force and is_cursor_running():
         print(
-            "WARNING: Cursor is running. Close Cursor FIRST (Cmd+Q / quit),\n"
+            f"WARNING: Cursor is running. Close Cursor FIRST ({cursor_quit_hint()}),\n"
             "then run this command, then reopen Cursor.\n"
             "Use --force to override (not recommended).\n",
             file=sys.stderr,
@@ -1723,7 +1774,7 @@ def purge_chats(
     """
     if not force and is_cursor_running():
         print(
-            "WARNING: Cursor is running. Close Cursor FIRST (Cmd+Q / quit),\n"
+            f"WARNING: Cursor is running. Close Cursor FIRST ({cursor_quit_hint()}),\n"
             "then run this command, then reopen Cursor.\n"
             "Use --force to override (not recommended).\n",
             file=sys.stderr,

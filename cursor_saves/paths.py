@@ -8,29 +8,113 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
+
+
+def get_config_dir() -> Path:
+    """Return the cursaves configuration directory for the current platform.
+
+    Windows: %APPDATA%/cursaves
+    macOS/Linux: ~/.config/cursaves
+    """
+    if platform.system() == "Windows":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return Path(appdata) / "cursaves"
+    return Path.home() / ".config" / "cursaves"
+
+
+def get_config_path() -> Path:
+    """Return the path to cursaves config.json."""
+    return get_config_dir() / "config.json"
+
+
+def file_uri_to_path(uri: str) -> Optional[str]:
+    """Convert a file:// URI to a local filesystem path."""
+    if not uri.startswith("file://"):
+        return None
+    parsed = urlparse(uri)
+    if parsed.netloc and len(parsed.netloc) == 1 and parsed.netloc[0].isalpha():
+        # file://C:/path (netloc holds drive letter on some URIs)
+        path = f"{parsed.netloc}:{unquote(parsed.path)}"
+    elif parsed.netloc:
+        # UNC: file://server/share/path
+        path = "//" + parsed.netloc + unquote(parsed.path)
+    else:
+        path = url2pathname(unquote(parsed.path))
+    return os.path.normpath(path)
+
+
+def path_to_file_uri(path: str) -> str:
+    """Convert a local filesystem path to a file:// URI."""
+    return Path(os.path.normpath(os.path.expanduser(path))).as_uri()
+
+
+def _folder_path_from_workspace_uri(folder_uri: str) -> Optional[str]:
+    """Extract a filesystem path from a workspace folder or workspace URI."""
+    if folder_uri.startswith("file://"):
+        return file_uri_to_path(folder_uri)
+    if folder_uri.startswith("vscode-remote://"):
+        parts = folder_uri.split("/", 3)
+        if len(parts) >= 4:
+            return os.path.normpath("/" + parts[3])
+    return None
 
 
 def get_cursor_user_dir() -> Path:
     """Return the Cursor User data directory for the current platform.
 
+    Set CURSAVES_CURSOR_DATA_DIR to target a custom Cursor --user-data-dir root,
+    or CURSAVES_CURSOR_USER_DIR to target its User directory directly.
+
     macOS:  ~/Library/Application Support/Cursor/User
     Linux:  ~/.config/Cursor/User
+    Windows: %APPDATA%/Cursor/User
     """
+    data_dir_override = os.environ.get("CURSAVES_CURSOR_DATA_DIR")
+    user_dir_override = os.environ.get("CURSAVES_CURSOR_USER_DIR")
+    if user_dir_override:
+        base = Path(os.path.expanduser(user_dir_override))
+    elif data_dir_override:
+        base = Path(os.path.expanduser(data_dir_override)) / "User"
+    else:
+        base = None
+
+    if base is not None:
+        return _require_cursor_user_dir(base, "custom override")
+
     system = platform.system()
     if system == "Darwin":
         base = Path.home() / "Library" / "Application Support" / "Cursor" / "User"
     elif system == "Linux":
         base = Path.home() / ".config" / "Cursor" / "User"
+    elif system == "Windows":
+        appdata = os.environ.get("APPDATA")
+        if not appdata:
+            print(
+                "Error: APPDATA environment variable is not set.\n"
+                "Cannot locate Cursor data on Windows.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        base = Path(appdata) / "Cursor" / "User"
     else:
         print(
             f"Error: Unsupported platform '{system}'.\n"
-            f"cursaves supports macOS and Linux.\n"
+            f"cursaves supports macOS, Linux, and Windows.\n"
             f"On macOS, Cursor data is at ~/Library/Application Support/Cursor/User/\n"
-            f"On Linux, Cursor data is at ~/.config/Cursor/User/",
+            f"On Linux, Cursor data is at ~/.config/Cursor/User/\n"
+            f"On Windows, Cursor data is at %APPDATA%/Cursor/User/",
             file=sys.stderr,
         )
         sys.exit(1)
 
+    return _require_cursor_user_dir(base, system)
+
+
+def _require_cursor_user_dir(base: Path, label: str) -> Path:
+    """Validate a Cursor User directory exists before using it."""
     if not base.exists():
         print(
             f"Error: Cursor data directory not found at:\n"
@@ -39,7 +123,7 @@ def get_cursor_user_dir() -> Path:
             f"  - Cursor is not installed on this machine, or\n"
             f"  - Cursor has never been opened (no data created yet), or\n"
             f"  - Cursor stores data at a non-standard location\n\n"
-            f"Expected path for {system}: {base}",
+            f"Expected path for {label}: {base}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -66,9 +150,16 @@ def sanitize_project_path(project_path: str) -> str:
     """Convert a project path to Cursor's sanitized directory name format.
 
     /Users/callum/Desktop/Projects/myrepo -> Users-callum-Desktop-Projects-myrepo
+    C:\\Users\\user\\repo -> c-Users-user-repo
     """
-    # Strip leading slash and replace / with -
-    return project_path.strip("/").replace("/", "-")
+    p = os.path.normpath(os.path.expanduser(project_path))
+    if platform.system() == "Windows":
+        if len(p) >= 2 and p[1] == ":":
+            p = p[2:]
+        p = p.lstrip("\\/")
+    else:
+        p = p.lstrip("/")
+    return p.replace("\\", "-").replace("/", "-")
 
 
 def _decode_ssh_host(host: str) -> str:
@@ -112,20 +203,8 @@ def find_workspace_dirs_for_project(project_path: str) -> list[Path]:
         try:
             data = json.loads(ws_json.read_text())
             folder_uri = data.get("folder", "")
-            # Handle file:// URIs
-            if folder_uri.startswith("file://"):
-                folder_path = folder_uri[len("file://") :]
-                # URL-decode common escapes
-                folder_path = folder_path.replace("%20", " ")
-            elif folder_uri.startswith("vscode-remote://"):
-                # SSH remote workspace - extract the path portion
-                # Format: vscode-remote://ssh-remote%2B<host>/<path>
-                parts = folder_uri.split("/", 3)
-                if len(parts) >= 4:
-                    folder_path = "/" + parts[3]
-                else:
-                    continue
-            else:
+            folder_path = _folder_path_from_workspace_uri(folder_uri)
+            if folder_path is None:
                 continue
 
             if os.path.normpath(folder_path) == target:
@@ -190,21 +269,20 @@ def list_all_workspaces() -> list[dict]:
             # workspace .code-workspace: uses "workspace" key instead of "folder"
             if "workspace" in data and not data.get("folder"):
                 ws_uri = data["workspace"]
-                if ws_uri.startswith("file://"):
-                    folder_uri = ws_uri
-                    folder_path = ws_uri[len("file://") :]
-                    folder_path = folder_path.replace("%20", " ")
-                    ws_type = "workspace"
-                else:
+                folder_path = _folder_path_from_workspace_uri(ws_uri)
+                if folder_path is None:
                     continue
+                folder_uri = ws_uri
+                ws_type = "workspace"
             else:
                 folder_uri = data.get("folder", "")
                 if not folder_uri:
                     continue
 
                 if folder_uri.startswith("file://"):
-                    folder_path = folder_uri[len("file://") :]
-                    folder_path = folder_path.replace("%20", " ")
+                    folder_path = _folder_path_from_workspace_uri(folder_uri)
+                    if folder_path is None:
+                        continue
                 elif folder_uri.startswith("vscode-remote://"):
                     ws_type = "ssh"
                     # Format: vscode-remote://ssh-remote%2B<host>/<path>
@@ -440,7 +518,7 @@ def is_sync_repo_initialized() -> bool:
     if (sync_dir / ".git").exists():
         return True
     # Check for non-git backend config
-    config_path = Path.home() / ".config" / "cursaves" / "config.json"
+    config_path = get_config_path()
     if config_path.exists():
         try:
             import json
