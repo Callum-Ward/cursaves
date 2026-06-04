@@ -18,8 +18,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
 
-
-_CONFIG_PATH = Path.home() / ".config" / "cursaves" / "config.json"
+from .paths import get_config_path
 
 
 # ── Abstract base ────────────────────────────────────────────────────────
@@ -139,32 +138,78 @@ class GitBackend(SyncBackend):
             return True
 
         try:
+            refs = subprocess.run(
+                ["git", "ls-remote", "--heads", "origin"],
+                cwd=str(self.sync_dir),
+                capture_output=True, text=True, timeout=30,
+            )
+            if refs.returncode != 0:
+                err = refs.stderr.strip() or refs.stdout.strip()
+                if err:
+                    print(f"  Remote check failed: {err}", file=sys.stderr)
+                else:
+                    print("  Remote check failed", file=sys.stderr)
+                return False
+            if not refs.stdout.strip():
+                # A newly-created remote has nothing to pull yet. The next push
+                # will publish this local sync repo's main branch.
+                return True
+
             fetch = subprocess.run(
                 ["git", "fetch", "--depth", "1", "origin"],
                 cwd=str(self.sync_dir),
                 capture_output=True, text=True, timeout=180,
             )
             if fetch.returncode != 0:
+                err = fetch.stderr.strip() or fetch.stdout.strip()
+                if err:
+                    print(f"  Fetch failed: {err}", file=sys.stderr)
+                else:
+                    print("  Fetch failed", file=sys.stderr)
                 return False
 
-            subprocess.run(
+            checkout = subprocess.run(
                 ["git", "checkout", "-f", "-B", "main", "origin/main"],
-                cwd=str(self.sync_dir), capture_output=True,
+                cwd=str(self.sync_dir), capture_output=True, text=True,
             )
-            subprocess.run(
+            if checkout.returncode != 0:
+                err = checkout.stderr.strip() or checkout.stdout.strip()
+                if err:
+                    print(f"  Checkout failed: {err}", file=sys.stderr)
+                return False
+
+            reset = subprocess.run(
                 ["git", "reset", "--hard", "origin/main"],
-                cwd=str(self.sync_dir), capture_output=True,
+                cwd=str(self.sync_dir), capture_output=True, text=True,
             )
-            subprocess.run(
+            if reset.returncode != 0:
+                err = reset.stderr.strip() or reset.stdout.strip()
+                if err:
+                    print(f"  Reset failed: {err}", file=sys.stderr)
+                return False
+
+            branch = subprocess.run(
                 ["git", "branch", "--set-upstream-to=origin/main", "main"],
-                cwd=str(self.sync_dir), capture_output=True,
+                cwd=str(self.sync_dir), capture_output=True, text=True,
             )
-            subprocess.run(
+            if branch.returncode != 0:
+                err = branch.stderr.strip() or branch.stdout.strip()
+                if err:
+                    print(f"  Branch setup failed: {err}", file=sys.stderr)
+                return False
+
+            clean = subprocess.run(
                 ["git", "clean", "-fd"],
-                cwd=str(self.sync_dir), capture_output=True,
+                cwd=str(self.sync_dir), capture_output=True, text=True,
             )
+            if clean.returncode != 0:
+                err = clean.stderr.strip() or clean.stdout.strip()
+                if err:
+                    print(f"  Clean failed: {err}", file=sys.stderr)
+                return False
             return True
         except subprocess.TimeoutExpired:
+            print("  Fetch timed out", file=sys.stderr)
             return False
 
     def init_repo(self, remote: Optional[str] = None):
@@ -222,7 +267,7 @@ class S3Backend(SyncBackend):
 
     Requires ``boto3`` — install with ``pip install cursaves[s3]``.
 
-    Configuration (in ~/.config/cursaves/config.json)::
+    Configuration (in cursaves config dir, see paths.get_config_path())::
 
         {
             "backend": "s3",
@@ -355,10 +400,11 @@ class S3Backend(SyncBackend):
 
 
 def load_config() -> dict:
-    """Load cursaves config from ~/.config/cursaves/config.json."""
-    if _CONFIG_PATH.exists():
+    """Load cursaves config from the platform config path."""
+    config_path = get_config_path()
+    if config_path.exists():
         try:
-            return json.loads(_CONFIG_PATH.read_text())
+            return json.loads(config_path.read_text())
         except (json.JSONDecodeError, OSError):
             pass
     return {}
@@ -366,8 +412,9 @@ def load_config() -> dict:
 
 def save_config(config: dict):
     """Persist cursaves config."""
-    _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _CONFIG_PATH.write_text(json.dumps(config, indent=2) + "\n")
+    config_path = get_config_path()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(config, indent=2) + "\n")
 
 
 def get_backend() -> SyncBackend:

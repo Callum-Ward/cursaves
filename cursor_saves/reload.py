@@ -22,6 +22,13 @@ def reload_cursor_window() -> bool:
         return _reload_macos()
     elif system == "Linux":
         return _reload_linux()
+    elif system == "Windows":
+        print(
+            "  Automated window reload is not supported on Windows.\n"
+            "  Restart Cursor (quit and reopen) to see imported chats.",
+            file=sys.stderr,
+        )
+        return False
     else:
         return False
 
@@ -122,4 +129,8 @@ def _reload_linux() -> bool:
 
 def print_reload_hint():
     """Print instructions for restarting Cursor to pick up changes."""
-    print("Restart Cursor (quit and reopen) to see imported chats.")
+    system = platform.system()
+    if system == "Windows":
+        print("Restart Cursor (File → Exit or Alt+F4, then reopen) to see imported chats.")
+    else:
+        print("Restart Cursor (quit and reopen) to see imported chats.")

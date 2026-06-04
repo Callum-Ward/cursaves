@@ -11,6 +11,7 @@ There are two databases that matter, plus some auxiliary files:
 ```
 ~/Library/Application Support/Cursor/User/   (macOS)
 ~/.config/Cursor/User/                        (Linux)
+%APPDATA%/Cursor/User/                        (Windows)
 ├── globalStorage/
 │   └── state.vscdb                           # Global DB -- conversation content + central index (3.0+)
 └── workspaceStorage/
