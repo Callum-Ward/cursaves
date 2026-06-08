@@ -3,27 +3,25 @@
 import argparse
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
 
 from . import __version__, db, export, paths
+from .reload import print_reload_hint
+from .watch import watch_loop
 from .backends import GitBackend, S3Backend, SyncBackend, get_backend, load_config, save_config
 from .importer import (
     copy_between_workspaces,
     doctor_audit,
     doctor_recover,
-    find_snapshot_dir_for_project,
     format_sync_status,
     get_push_status_for_conversation,
     get_sync_status_for_snapshot,
     import_all_snapshots,
-    import_from_snapshot_dir,
     import_snapshot,
     list_snapshot_projects,
     list_snapshot_files,
-    read_snapshot_file,
     read_snapshot_meta,
     repair_missing_blobs,
 )
@@ -51,8 +49,6 @@ def _delete_snapshot(path: Path):
     meta = path.parent / f"{sid}.meta.json"
     if meta.exists():
         meta.unlink()
-from .reload import print_reload_hint
-from .watch import watch_loop
 
 
 
@@ -108,7 +104,6 @@ def _resolve_workspace_for_import(args) -> tuple[str, "Path | None"]:
     directly into that specific workspace. Otherwise returns (project_path, None)
     and the importer will find/create a workspace automatically.
     """
-    from pathlib import Path
 
     if hasattr(args, "workspace") and args.workspace:
         ws = paths.resolve_workspace(args.workspace)
@@ -248,7 +243,7 @@ def cmd_snapshots(args):
             global_cdb.close()
 
     print(f"\n{len(projects)} project(s) with snapshots")
-    print(f"\nUse 'cursaves pull -s' to interactively select which to import.")
+    print("\nUse 'cursaves pull -s' to interactively select which to import.")
 
 
 def cmd_init(args):
@@ -282,7 +277,7 @@ def cmd_init(args):
             region=config["s3"].get("region"),
         )
 
-        print(f"Configured S3 backend:")
+        print("Configured S3 backend:")
         print(f"  Bucket: {bucket}")
         print(f"  Prefix: {config['s3'].get('prefix', 'snapshots/')}")
         if config["s3"].get("region"):
@@ -292,14 +287,14 @@ def cmd_init(args):
         # Verify access
         try:
             if backend.is_initialized():
-                print(f"\n  Bucket access verified.")
+                print("\n  Bucket access verified.")
             else:
                 print(f"\n  Warning: Could not access bucket '{bucket}'.", file=sys.stderr)
-                print(f"  Check your AWS credentials and bucket permissions.", file=sys.stderr)
+                print("  Check your AWS credentials and bucket permissions.", file=sys.stderr)
         except Exception as e:
             print(f"\n  Warning: Could not verify bucket access: {e}", file=sys.stderr)
 
-        print(f"\nDone. Run 'cursaves sync' to synchronize conversations.")
+        print("\nDone. Run 'cursaves sync' to synchronize conversations.")
         return
 
     # Git backend (default / backward-compatible)
@@ -328,11 +323,11 @@ def cmd_init(args):
 
     if args.remote:
         print(f"  Added remote: {args.remote}")
-        print(f"\nDone. Run 'cursaves push' from any project directory to start syncing.")
+        print("\nDone. Run 'cursaves push' from any project directory to start syncing.")
     else:
-        print(f"\nDone. To sync between machines, add a remote:")
-        print(f"  cursaves init --remote git@github.com:you/my-cursaves.git")
-        print(f"  cursaves init --backend s3 --bucket my-cursor-saves")
+        print("\nDone. To sync between machines, add a remote:")
+        print("  cursaves init --remote git@github.com:you/my-cursaves.git")
+        print("  cursaves init --backend s3 --bucket my-cursor-saves")
 
 
 def cmd_list(args):
@@ -345,10 +340,10 @@ def cmd_list(args):
         ws_dirs = paths.find_workspace_dirs_for_project(project_path)
         if not ws_dirs:
             print(
-                f"\nNo Cursor workspace found for this path. Possible causes:\n"
-                f"  - This directory has never been opened in Cursor\n"
-                f"  - The path doesn't match exactly (try an absolute path with -p)\n"
-                f"  - Cursor data is in a non-standard location",
+                "\nNo Cursor workspace found for this path. Possible causes:\n"
+                "  - This directory has never been opened in Cursor\n"
+                "  - The path doesn't match exactly (try an absolute path with -p)\n"
+                "  - Cursor data is in a non-standard location",
                 file=sys.stderr,
             )
         else:
@@ -481,7 +476,7 @@ def _select_target_workspaces(source_paths: set[str]) -> list[dict]:
         return [ws]
 
     # Multiple matches - ask user to select
-    print(f"\n  Multiple workspaces match this project:")
+    print("\n  Multiple workspaces match this project:")
     print(f"  {'#':<4} {'Type':<6} {'Host':<15} {'Path'}")
     print(f"  {'-' * 70}")
 
@@ -492,7 +487,7 @@ def _select_target_workspaces(source_paths: set[str]) -> list[dict]:
             ws_path = "..." + ws_path[-42:]
         print(f"  {i:<4} {ws['type']:<6} {host:<15} {ws_path}")
 
-    print(f"\n  Select workspace(s) to import into (e.g. 1,2 or 'all'):")
+    print("\n  Select workspace(s) to import into (e.g. 1,2 or 'all'):")
     try:
         choice = input("  > ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -611,9 +606,21 @@ def _select_conversations(project_path: str, prompt: str = "push", workspace_dir
     return tui_select_conversations(conversations, action=prompt)
 
 
-def _find_ahead_conversations() -> list[dict]:
+def _find_ahead_conversations(
+    target_project_path: Optional[str] = None,
+    target_workspace_dir: Optional[Path] = None,
+    include_never_pushed: bool = False,
+) -> list[dict]:
     """Scan all workspaces for conversations that are ahead of their snapshots."""
     workspaces = paths.list_workspaces_with_conversations()
+
+    # Filter workspaces if specified
+    if target_workspace_dir:
+        workspaces = [w for w in workspaces if str(w["workspace_dir"]) == str(target_workspace_dir)]
+    elif target_project_path:
+        target_project_id = paths.get_project_identifier(target_project_path)
+        workspaces = [w for w in workspaces if paths.get_project_identifier(w["path"]) == target_project_id]
+
     ahead_items: list[dict] = []
 
     global_db_path = paths.get_global_db_path()
@@ -635,7 +642,7 @@ def _find_ahead_conversations() -> list[dict]:
 
             for cid in composer_ids:
                 status = get_push_status_for_conversation(cid, project_id, _cdb=global_cdb)
-                if status == "local_ahead":
+                if status == "local_ahead" or (include_never_pushed and status == "never_pushed"):
                     # Get chat name from global DB
                     cd = global_cdb.get_json(f"composerData:{cid}")
                     name = cd.get("name", "Untitled") if cd else "Untitled"
@@ -697,13 +704,23 @@ def _export_and_push(sync_dir: Path, items: list[dict], backend: Optional[SyncBa
     return total_saved
 
 
-def _push_ahead(sync_dir: Path, auto: bool = False, backend: Optional[SyncBackend] = None) -> int:
+def _push_ahead(
+    sync_dir: Path,
+    auto: bool = False,
+    backend: Optional[SyncBackend] = None,
+    target_project_path: Optional[str] = None,
+    target_workspace_dir: Optional[Path] = None,
+    include_never_pushed: bool = False,
+) -> int:
     """Find conversations ahead of snapshots and push them.
 
     Args:
         sync_dir: The sync repo directory.
         auto: If True, skip prompts and push all ahead conversations.
-        backend: Sync backend to use for push. Auto-detected if None.
+        backend: Sync backend to use push. Auto-detected if None.
+        target_project_path: Optional target project path to scope search.
+        target_workspace_dir: Optional target workspace directory to scope search.
+        include_never_pushed: If True, include conversations that have never been pushed.
 
     Returns the number of conversations pushed.
     """
@@ -719,7 +736,11 @@ def _push_ahead(sync_dir: Path, auto: bool = False, backend: Optional[SyncBacken
             else:
                 print(" failed (continuing with local state)", file=sys.stderr)
 
-    ahead_items = _find_ahead_conversations()
+    ahead_items = _find_ahead_conversations(
+        target_project_path=target_project_path,
+        target_workspace_dir=target_workspace_dir,
+        include_never_pushed=include_never_pushed,
+    )
 
     if not ahead_items:
         if not auto:
@@ -734,6 +755,14 @@ def _push_ahead(sync_dir: Path, auto: bool = False, backend: Optional[SyncBacken
                 name = name[:37] + "..."
             print(f"    {name} [{item['workspace_label']}]")
         total = _export_and_push(sync_dir, ahead_items, backend=backend)
+        if total == 0:
+            print(
+                "  Warning: 0 conversation(s) exported. If chats exist in Cursor, "
+                "quit Cursor (Cmd+Q) and retry, or upgrade cursaves.",
+                file=sys.stderr,
+            )
+        else:
+            print(f"  Exported {total} conversation(s).")
         return total
 
     print(f"\n  {len(ahead_items)} conversation(s) ahead of snapshots:\n")
@@ -749,7 +778,7 @@ def _push_ahead(sync_dir: Path, auto: bool = False, backend: Optional[SyncBacken
             ws_label = ws_label[:27] + "..."
         print(f"  {i:<4} {name:<36} {ws_label}")
 
-    print(f"\n  Push these? (e.g. 1,3,5 or 1-3 or 'all') [all]:")
+    print("\n  Push these? (e.g. 1,3,5 or 1-3 or 'all') [all]:")
     try:
         choice = input("  > ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -799,7 +828,11 @@ def _save_sync_state(state: dict):
     state_path.write_text(json.dumps(state, indent=2))
 
 
-def _pull_behind(sync_dir: Path) -> int:
+def _pull_behind(
+    sync_dir: Path,
+    target_project_path: Optional[str] = None,
+    target_workspace_dir: Optional[Path] = None,
+) -> int:
     """Find all snapshots where local is behind and import them automatically.
 
     For each behind/new snapshot, finds workspaces that already have the
@@ -811,6 +844,10 @@ def _pull_behind(sync_dir: Path) -> int:
     projects = list_snapshot_projects()
     if not projects:
         return 0
+
+    if target_project_path:
+        target_project_id = paths.get_project_identifier(target_project_path)
+        projects = [p for p in projects if p["name"] == target_project_id]
 
     global_db_path = paths.get_global_db_path()
     global_cdb = db.CursorDB(global_db_path) if global_db_path.exists() else None
@@ -858,6 +895,9 @@ def _pull_behind(sync_dir: Path) -> int:
                     if ws_dir_str not in seen_ws_dirs:
                         seen_ws_dirs.add(ws_dir_str)
                         all_matches.append(ws)
+
+            if target_workspace_dir:
+                all_matches = [ws for ws in all_matches if str(ws["workspace_dir"]) == str(target_workspace_dir)]
 
             if not all_matches:
                 continue
@@ -945,9 +985,26 @@ def cmd_sync(args):
             print(" failed", file=sys.stderr)
             return
 
+    # Determine scope: local (current directory), workspace selector, or project path
+    is_local = getattr(args, "local", False) or getattr(args, "workspace", None) or getattr(args, "project", None)
+    target_project_path = None
+    target_workspace_dir = None
+
+    if is_local:
+        target_project_path, target_workspace_dir, _ = _resolve_project_and_workspace(args)
+        project_id = paths.get_project_identifier(target_project_path)
+        print(f"\nScoping sync to project: {target_project_path} ({project_id})")
+        if target_workspace_dir:
+            ws_label = paths.format_workspace_display(
+                {"type": "ssh" if "ssh" in str(target_workspace_dir) else "local",
+                 "host": None, "path": target_project_path},
+                include_path=True
+            )
+            print(f"Workspace: {ws_label}")
+
     # Step 2: Import — pull behind conversations from snapshots into Cursor DBs
     print("\n── Pull ──")
-    imported = _pull_behind(sync_dir)
+    imported = _pull_behind(sync_dir, target_project_path=target_project_path, target_workspace_dir=target_workspace_dir)
     if imported > 0:
         print(f"  Imported {imported} conversation(s)")
     else:
@@ -955,7 +1012,15 @@ def cmd_sync(args):
 
     # Step 3: Push — export ahead conversations from Cursor DBs into snapshots
     print("\n── Push ──")
-    pushed = _push_ahead(sync_dir, auto=True, backend=backend)
+    include_never = getattr(args, "all_chats", False)
+    pushed = _push_ahead(
+        sync_dir,
+        auto=True,
+        backend=backend,
+        target_project_path=target_project_path,
+        target_workspace_dir=target_workspace_dir,
+        include_never_pushed=include_never,
+    )
     if pushed == 0:
         print("  Nothing to push")
 
@@ -980,8 +1045,10 @@ def cmd_push(args):
     backend = get_backend()
     snapshots_dir = paths.get_snapshots_dir()
 
-    if getattr(args, "ahead", False):
-        _push_ahead(sync_dir, backend=backend)
+    if getattr(args, "ahead", False) or getattr(args, "global_sync", False):
+        # If --all is also set, push ALL conversations across ALL workspaces (full global backup)
+        include_never = getattr(args, "all_chats", False)
+        _push_ahead(sync_dir, auto=True, backend=backend, include_never_pushed=include_never)
         return
 
     # Step 0: Pull latest from remote
@@ -1079,6 +1146,18 @@ def cmd_pull(args):
     if not _backend_pull():
         return
 
+    # If --global is set, pull behind chats for all workspaces
+    if getattr(args, "global_sync", False):
+        print("\n── Pull (Global) ──")
+        imported = _pull_behind(sync_dir)
+        if imported > 0:
+            print(f"  Imported {imported} conversation(s)")
+            from .reload import print_reload_hint
+            print_reload_hint()
+        else:
+            print("  Everything up to date")
+        return
+
     # Step 2: Select what to import
     if args.select:
         from .interactive import select_one, select_snapshots
@@ -1143,8 +1222,8 @@ def cmd_pull(args):
                 if cwd_basename in source_basenames or project["name"] == paths.get_project_identifier(cwd):
                     target_path = cwd
                 else:
-                    print(f"  No matching workspaces found.")
-                    print(f"  Enter a local project path to import into (or press Enter to skip):")
+                    print("  No matching workspaces found.")
+                    print("  Enter a local project path to import into (or press Enter to skip):")
                     try:
                         target_path = input("  > ").strip()
                     except (EOFError, KeyboardInterrupt):
@@ -1158,10 +1237,10 @@ def cmd_pull(args):
                     print(f"  Importing {sf.name}...")
                     if import_snapshot(sf, target_path):
                         total_success += 1
-                        print(f"    OK")
+                        print("    OK")
                     else:
                         total_failure += 1
-                        print(f"    FAILED")
+                        print("    FAILED")
             else:
                 for ws in target_workspaces:
                     display = paths.format_workspace_display(ws)
@@ -1223,7 +1302,7 @@ def cmd_watch(args):
 def cmd_copy(args):
     """Copy conversations between workspaces on the same machine."""
     # Select source workspace
-    print(f"\n  Select SOURCE workspace (copy from):")
+    print("\n  Select SOURCE workspace (copy from):")
     source = _select_workspace()
     if not source:
         return
@@ -1238,7 +1317,7 @@ def cmd_copy(args):
         return
 
     # Select target workspace
-    print(f"\n  Select TARGET workspace (copy to):")
+    print("\n  Select TARGET workspace (copy to):")
     target = _select_workspace()
     if not target:
         return
@@ -1304,13 +1383,13 @@ def cmd_status(args):
     print(f"  Snapshot only (not imported): {len(only_snapshot)}")
 
     if only_local:
-        print(f"\nLocal only (run 'checkpoint' to export):")
+        print("\nLocal only (run 'checkpoint' to export):")
         for c in local_convos:
             if c["id"] in only_local:
                 print(f"  {c['id'][:12]}...  {c['name']}")
 
     if only_snapshot:
-        print(f"\nSnapshot only (run 'import --all' to import):")
+        print("\nSnapshot only (run 'import --all' to import):")
         for sid in sorted(only_snapshot):
             print(f"  {sid[:12]}...")
 
@@ -1486,7 +1565,7 @@ def cmd_delete(args):
         snapshot_info.append({"file": f, "name": name, "exported_at": exported_at, "source": source})
         print(f"  {i:<4} {name:<35} {exported_at[:19]:<20} from {source}")
 
-    print(f"\nEnter numbers to delete (e.g. 1,3,5 or 1-3 or 'all'):")
+    print("\nEnter numbers to delete (e.g. 1,3,5 or 1-3 or 'all'):")
     try:
         choice = input("> ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -1516,7 +1595,6 @@ def cmd_delete(args):
 
 def cmd_doctor(args):
     """Audit and recover orphaned chats."""
-    from .export import format_timestamp
 
     audit = doctor_audit()
     storage = audit["storage"]
@@ -1540,7 +1618,7 @@ def cmd_doctor(args):
 
     if audit["workspaces"]:
         print(
-            f"  ─── Workspaces with chats ───────────────────────────────────\n"
+            "  ─── Workspaces with chats ───────────────────────────────────\n"
         )
         for ws in audit["workspaces"]:
             print(f"  {ws['chat_count']:>3} chats   {ws['label']}")
@@ -1570,7 +1648,7 @@ def cmd_doctor(args):
 
     if args.recover:
         if args.select:
-            print(f"  Select chats to recover (e.g. 1,3,5 or 1-3 or 'all') [all]:")
+            print("  Select chats to recover (e.g. 1,3,5 or 1-3 or 'all') [all]:")
             try:
                 choice = input("  > ").strip()
             except (EOFError, KeyboardInterrupt):
@@ -1596,8 +1674,8 @@ def cmd_doctor(args):
             print(f"  {failed} chat(s) could not be matched to a workspace.")
     else:
         print(
-            f"  Run 'cursaves doctor --recover' to re-register orphaned chats.\n"
-            f"  Run 'cursaves doctor --recover -s' to select which chats to recover.\n"
+            "  Run 'cursaves doctor --recover' to re-register orphaned chats.\n"
+            "  Run 'cursaves doctor --recover -s' to select which chats to recover.\n"
         )
 
 
@@ -1792,6 +1870,14 @@ def main():
         "--ahead", "-a", action="store_true",
         help="Find and push all conversations ahead of snapshots across all workspaces",
     )
+    p_push.add_argument(
+        "--global", "-g", dest="global_sync", action="store_true",
+        help="Push ahead conversations across all workspaces (same as --ahead)",
+    )
+    p_push.add_argument(
+        "--local", "-l", action="store_true",
+        help="Push only the current project/workspace conversations (default)",
+    )
     p_push.set_defaults(func=cmd_push)
 
     # ── pull ────────────────────────────────────────────────────────
@@ -1808,6 +1894,14 @@ def main():
         help="Interactively select which snapshot projects to import",
     )
     p_pull.add_argument(
+        "--global", "-g", dest="global_sync", action="store_true",
+        help="Pull behind conversations across all workspaces",
+    )
+    p_pull.add_argument(
+        "--local", "-l", action="store_true",
+        help="Pull only for the current project/workspace (default)",
+    )
+    p_pull.add_argument(
         "--force", action="store_true",
         help="Suppress the Cursor-running warning",
     )
@@ -1821,6 +1915,19 @@ def main():
     p_sync = subparsers.add_parser(
         "sync", help="Pull behind + push ahead — one command to stay in sync across machines"
     )
+    p_sync.add_argument(
+        "--global", "-g", dest="global_sync", action="store_true",
+        help="Sync all workspaces (default)",
+    )
+    p_sync.add_argument(
+        "--local", "-l", action="store_true",
+        help="Sync only the current project/workspace",
+    )
+    p_sync.add_argument(
+        "--all", dest="all_chats", action="store_true",
+        help="Sync all conversations, including those never pushed before",
+    )
+    add_project_args(p_sync)
     p_sync.set_defaults(func=cmd_sync)
 
     # ── repair ─────────────────────────────────────────────────────
@@ -1942,9 +2049,13 @@ def main():
             "\n"
             "  init                  Initialize ~/.cursaves/ sync repo\n"
             "  init -r <url>         Initialize with git remote URL\n"
-            "  push                  Save + commit + push chats\n"
+            "  sync                  Pull behind + push ahead all workspaces (default)\n"
+            "  sync -l               Sync only the current project/workspace\n"
+            "  push                  Save + commit + push current project chats\n"
+            "  push -g               Push ahead conversations across all workspaces\n"
             "  push -s               Select workspace + chats to push\n"
-            "  pull                  Pull + import chats\n"
+            "  pull                  Pull + import chats for current project\n"
+            "  pull -g               Pull + import chats across all workspaces\n"
             "  pull -s               Select which snapshots to import\n"
             "\n"
             "─── Copy between workspaces (same machine) ─────────────────────\n"
@@ -1968,6 +2079,8 @@ def main():
             "\n"
             "─── Options ─────────────────────────────────────────────────────\n"
             "\n"
+            "  -g, --global          Run operation globally (across all projects)\n"
+            "  -l, --local           Run operation locally (scope to current project)\n"
             "  -w <number>           Target workspace # (from 'workspaces')\n"
             "  -p <path>             Target project path\n"
             "  -s, --select          Interactive selection mode\n"

@@ -5,6 +5,7 @@ import shutil
 import sqlite3
 import tempfile
 from pathlib import Path
+from contextlib import contextmanager
 from typing import Any, Optional
 
 
@@ -16,10 +17,26 @@ class CursorDB:
     the original file and require Cursor to be closed.
     """
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, no_copy: bool = True):
         self.db_path = db_path
+        self.no_copy = no_copy
         self._tmp_path: Optional[Path] = None
         self._conn: Optional[sqlite3.Connection] = None
+        self._in_transaction = False
+
+    @staticmethod
+    def _probe_readable(conn: sqlite3.Connection) -> None:
+        """Raise OperationalError if the connection cannot read Cursor tables."""
+        tables = [
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('cursorDiskKV', 'ItemTable')"
+            ).fetchall()
+        ]
+        if not tables:
+            raise sqlite3.OperationalError("no Cursor tables visible")
+        for table in tables:
+            conn.execute(f"SELECT key FROM {table} LIMIT 1").fetchone()
 
     def _ensure_read_copy(self) -> sqlite3.Connection:
         """Copy the database to a temp file and open a read-only connection."""
@@ -28,6 +45,20 @@ class CursorDB:
 
         if not self.db_path.exists():
             raise FileNotFoundError(f"Database not found: {self.db_path}")
+
+        # Try to connect directly in read-only and lock-free mode for speed.
+        # Must validate real table reads: nolock can open the file but return an
+        # empty/unreadable WAL view (paths with spaces, or Cursor actively writing).
+        if self.no_copy:
+            try:
+                db_uri = f"{self.db_path.resolve().as_uri()}?mode=ro&nolock=1"
+                conn = sqlite3.connect(db_uri, uri=True)
+                conn.execute("SELECT 1").fetchone()
+                self._probe_readable(conn)
+                self._conn = conn
+                return self._conn
+            except sqlite3.OperationalError:
+                pass
 
         # Copy the main db file and any WAL/SHM files
         tmp_dir = tempfile.mkdtemp(prefix="cursaves-")
@@ -66,6 +97,25 @@ class CursorDB:
 
     def __exit__(self, *args):
         self.close()
+
+    @contextmanager
+    def transaction(self):
+        """Context manager to run multiple write operations in a single transaction."""
+        conn = self._get_write_conn()
+        if self._in_transaction:
+            yield
+            return
+
+        self._in_transaction = True
+        conn.execute("BEGIN")
+        try:
+            yield
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            self._in_transaction = False
 
     # ── Read operations (on temp copy) ──────────────────────────────
 
@@ -157,6 +207,64 @@ class CursorDB:
         except json.JSONDecodeError:
             return None
 
+    def get_items_by_prefix(self, prefix: str, table: str = "cursorDiskKV") -> dict[str, str]:
+        """Get all key-value pairs matching a prefix as strings."""
+        conn = self._ensure_read_copy()
+        try:
+            rows = conn.execute(
+                f"SELECT key, value FROM {table} WHERE key LIKE ?", (prefix + "%",)
+            ).fetchall()
+            result = {}
+            for k, v in rows:
+                if isinstance(v, bytes):
+                    result[k] = v.decode("utf-8", errors="replace")
+                elif v is not None:
+                    result[k] = v
+            return result
+        except sqlite3.OperationalError:
+            return {}
+
+    def get_json_items_by_prefix(self, prefix: str, table: str = "cursorDiskKV") -> dict[str, Any]:
+        """Get all key-value pairs matching a prefix and parse values as JSON."""
+        conn = self._ensure_read_copy()
+        try:
+            rows = conn.execute(
+                f"SELECT key, value FROM {table} WHERE key LIKE ?", (prefix + "%",)
+            ).fetchall()
+            result = {}
+            for k, v in rows:
+                if isinstance(v, bytes):
+                    v = v.decode("utf-8", errors="replace")
+                try:
+                    result[k] = json.loads(v) if v is not None else None
+                except json.JSONDecodeError:
+                    result[k] = None
+            return result
+        except sqlite3.OperationalError:
+            return {}
+
+    def get_items_by_keys_binary(self, keys: list[str], table: str = "cursorDiskKV") -> dict[str, bytes]:
+        """Get multiple raw binary values from the key-value store in a single query."""
+        if not keys:
+            return {}
+        conn = self._ensure_read_copy()
+        result = {}
+        try:
+            for i in range(0, len(keys), 500):
+                batch = keys[i : i + 500]
+                placeholders = ",".join("?" for _ in batch)
+                rows = conn.execute(
+                    f"SELECT key, value FROM {table} WHERE key IN ({placeholders})", batch
+                ).fetchall()
+                for k, v in rows:
+                    if isinstance(v, str):
+                        result[k] = v.encode("utf-8")
+                    elif v is not None:
+                        result[k] = v
+            return result
+        except sqlite3.OperationalError:
+            return {}
+
     # ── Write operations (on original file) ─────────────────────────
 
     def _get_write_conn(self) -> sqlite3.Connection:
@@ -176,7 +284,8 @@ class CursorDB:
             f"INSERT OR REPLACE INTO {table} (key, value) VALUES (?, ?)",
             (key, value),
         )
-        conn.commit()
+        if not self._in_transaction:
+            conn.commit()
 
     def write_disk_kv(self, key: str, value: str):
         """Write a value to cursorDiskKV on the ORIGINAL database."""
@@ -193,15 +302,19 @@ class CursorDB:
         connection and one transaction for all items.
         """
         conn = self._get_write_conn()
-        conn.execute("BEGIN")
+        in_txn = self._in_transaction
+        if not in_txn:
+            conn.execute("BEGIN")
         try:
             conn.executemany(
                 f"INSERT OR REPLACE INTO {table} (key, value) VALUES (?, ?)",
                 items,
             )
-            conn.execute("COMMIT")
+            if not in_txn:
+                conn.execute("COMMIT")
         except Exception:
-            conn.execute("ROLLBACK")
+            if not in_txn:
+                conn.execute("ROLLBACK")
             raise
 
     def write_json_batch(self, items: list[tuple[str, Any]], table: str = "cursorDiskKV"):
@@ -220,7 +333,9 @@ class CursorDB:
         if not keys:
             return 0
         conn = self._get_write_conn()
-        conn.execute("BEGIN")
+        in_txn = self._in_transaction
+        if not in_txn:
+            conn.execute("BEGIN")
         try:
             total = 0
             for batch_start in range(0, len(keys), 500):
@@ -230,10 +345,12 @@ class CursorDB:
                     f"DELETE FROM {table} WHERE key IN ({placeholders})", batch
                 )
                 total += cur.rowcount
-            conn.execute("COMMIT")
+            if not in_txn:
+                conn.execute("COMMIT")
             return total
         except Exception:
-            conn.execute("ROLLBACK")
+            if not in_txn:
+                conn.execute("ROLLBACK")
             raise
 
     def delete_keys_by_prefix(self, prefix: str, table: str = "cursorDiskKV") -> int:
@@ -245,7 +362,8 @@ class CursorDB:
         cur = conn.execute(
             f"DELETE FROM {table} WHERE key LIKE ?", (prefix + "%",)
         )
-        conn.commit()
+        if not self._in_transaction:
+            conn.commit()
         return cur.rowcount
 
 

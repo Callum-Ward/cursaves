@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
+from urllib.parse import unquote
 
 
 def get_cursor_user_dir() -> Path:
@@ -15,18 +16,22 @@ def get_cursor_user_dir() -> Path:
 
     macOS:  ~/Library/Application Support/Cursor/User
     Linux:  ~/.config/Cursor/User
+    Windows: %APPDATA%\\Cursor\\User
     """
     system = platform.system()
     if system == "Darwin":
         base = Path.home() / "Library" / "Application Support" / "Cursor" / "User"
     elif system == "Linux":
         base = Path.home() / ".config" / "Cursor" / "User"
+    elif system == "Windows":
+        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "Cursor" / "User"
     else:
         print(
             f"Error: Unsupported platform '{system}'.\n"
-            f"cursaves supports macOS and Linux.\n"
+            f"cursaves supports macOS, Linux, and Windows.\n"
             f"On macOS, Cursor data is at ~/Library/Application Support/Cursor/User/\n"
-            f"On Linux, Cursor data is at ~/.config/Cursor/User/",
+            f"On Linux, Cursor data is at ~/.config/Cursor/User/\n"
+            f"On Windows, Cursor data is at %APPDATA%\\Cursor\\User\\",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -67,8 +72,8 @@ def sanitize_project_path(project_path: str) -> str:
 
     /Users/callum/Desktop/Projects/myrepo -> Users-callum-Desktop-Projects-myrepo
     """
-    # Strip leading slash and replace / with -
-    return project_path.strip("/").replace("/", "-")
+    # Strip leading slash/backslash and replace path separators with -
+    return project_path.strip("/\\").replace("/", "-").replace("\\", "-")
 
 
 def _decode_ssh_host(host: str) -> str:
@@ -89,6 +94,19 @@ def _decode_ssh_host(host: str) -> str:
     return host
 
 
+def _decode_file_uri(uri: str) -> str:
+    """Decode a file:// URI to a local filesystem path.
+
+    Handles URL-encoded characters (%20 -> space, %3A -> colon, etc.)
+    and strips the leading slash on Windows drive paths (/C:/... -> C:/...).
+    """
+    path = unquote(uri[len("file://"):])
+    # On Windows, file:///C:/... becomes /C:/... after stripping scheme
+    if platform.system() == "Windows" and len(path) > 2 and path[0] == "/" and path[2] == ":":
+        path = path[1:]
+    return path
+
+
 def find_workspace_dirs_for_project(project_path: str) -> list[Path]:
     """Find all workspace directories that map to a given project path.
 
@@ -101,6 +119,9 @@ def find_workspace_dirs_for_project(project_path: str) -> list[Path]:
 
     # Normalise the target path for comparison
     target = os.path.normpath(os.path.expanduser(project_path))
+    # On Windows, paths are case-insensitive
+    if platform.system() == "Windows":
+        target = target.lower()
 
     matches = []
     for ws_dir in ws_storage.iterdir():
@@ -114,9 +135,7 @@ def find_workspace_dirs_for_project(project_path: str) -> list[Path]:
             folder_uri = data.get("folder", "")
             # Handle file:// URIs
             if folder_uri.startswith("file://"):
-                folder_path = folder_uri[len("file://") :]
-                # URL-decode common escapes
-                folder_path = folder_path.replace("%20", " ")
+                folder_path = _decode_file_uri(folder_uri)
             elif folder_uri.startswith("vscode-remote://"):
                 # SSH remote workspace - extract the path portion
                 # Format: vscode-remote://ssh-remote%2B<host>/<path>
@@ -128,7 +147,10 @@ def find_workspace_dirs_for_project(project_path: str) -> list[Path]:
             else:
                 continue
 
-            if os.path.normpath(folder_path) == target:
+            norm_folder = os.path.normpath(folder_path)
+            if platform.system() == "Windows":
+                norm_folder = norm_folder.lower()
+            if norm_folder == target:
                 matches.append(ws_dir)
         except (json.JSONDecodeError, OSError):
             continue
@@ -192,8 +214,7 @@ def list_all_workspaces() -> list[dict]:
                 ws_uri = data["workspace"]
                 if ws_uri.startswith("file://"):
                     folder_uri = ws_uri
-                    folder_path = ws_uri[len("file://") :]
-                    folder_path = folder_path.replace("%20", " ")
+                    folder_path = _decode_file_uri(ws_uri)
                     ws_type = "workspace"
                 else:
                     continue
@@ -203,8 +224,7 @@ def list_all_workspaces() -> list[dict]:
                     continue
 
                 if folder_uri.startswith("file://"):
-                    folder_path = folder_uri[len("file://") :]
-                    folder_path = folder_path.replace("%20", " ")
+                    folder_path = _decode_file_uri(folder_uri)
                 elif folder_uri.startswith("vscode-remote://"):
                     ws_type = "ssh"
                     # Format: vscode-remote://ssh-remote%2B<host>/<path>
@@ -215,6 +235,7 @@ def list_all_workspaces() -> list[dict]:
                         host = authority.split("+", 1)[1]
                     # Decode the host if it's hex-encoded JSON (e.g. {"hostName":"core"})
                     if host:
+                        host = unquote(host)
                         host = _decode_ssh_host(host)
                     parts = folder_uri.split("/", 3)
                     if len(parts) >= 4:
@@ -328,7 +349,7 @@ def get_workspace_composer_ids(ws_db_path: Path) -> list[str]:
         with db.CursorDB(ws_db_path) as cdb:
             data = cdb.get_json("composer.composerData", table="ItemTable")
             if not data:
-                return list(ids)
+                return list(ids)  # headers-only workspace (Cursor 3.0+)
 
             # Cursor 2.x: allComposers (complete list for old workspaces)
             for c in data.get("allComposers", []):
@@ -412,8 +433,10 @@ def resolve_workspace(selector: str) -> Optional[dict]:
                 return ws
 
     # Try as path substring
+    norm_selector = selector.replace("\\", "/")
     for ws in workspaces:
-        if selector in ws["path"]:
+        norm_path = ws["path"].replace("\\", "/")
+        if norm_selector in norm_path:
             return ws
 
     return None
@@ -434,16 +457,26 @@ def get_snapshots_dir() -> Path:
     return snapshots
 
 
+def _get_config_dir() -> Path:
+    """Return the cursaves config directory.
+
+    Linux/macOS: ~/.config/cursaves/
+    Windows: %APPDATA%/cursaves/
+    """
+    if platform.system() == "Windows":
+        return Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "cursaves"
+    return Path.home() / ".config" / "cursaves"
+
+
 def is_sync_repo_initialized() -> bool:
     """Check if a sync backend has been configured (git repo or cloud)."""
     sync_dir = get_sync_dir()
     if (sync_dir / ".git").exists():
         return True
     # Check for non-git backend config
-    config_path = Path.home() / ".config" / "cursaves" / "config.json"
+    config_path = _get_config_dir() / "config.json"
     if config_path.exists():
         try:
-            import json
             cfg = json.loads(config_path.read_text())
             return cfg.get("backend") in ("s3", "azure")
         except Exception:
@@ -524,6 +557,10 @@ def format_workspace_display(ws: dict, include_path: bool = True) -> str:
 # ── Project identification ────────────────────────────────────────────
 
 
+_git_remote_cache: dict[str, Optional[str]] = {}
+_project_id_cache: dict[str, str] = {}
+
+
 def get_project_identifier(project_path: str) -> str:
     """Get a stable identifier for a project, used as the snapshot subdirectory.
 
@@ -534,26 +571,42 @@ def get_project_identifier(project_path: str) -> str:
       - Same repo under different local names (bob/ vs alice/) → same identifier
       - Different repos that happen to share a name → different identifiers
     """
+    normalized_path = os.path.normpath(project_path)
+    if normalized_path in _project_id_cache:
+        return _project_id_cache[normalized_path]
+
     remote_url = _get_git_remote_url(project_path)
     if remote_url:
-        return _normalize_remote_url(remote_url)
-    return os.path.basename(os.path.normpath(project_path))
+        ident = _normalize_remote_url(remote_url)
+    else:
+        ident = os.path.basename(normalized_path)
+
+    _project_id_cache[normalized_path] = ident
+    return ident
 
 
 def _get_git_remote_url(project_path: str) -> Optional[str]:
     """Get the git remote origin URL for a project, if any."""
+    normalized_path = os.path.normpath(project_path)
+    if normalized_path in _git_remote_cache:
+        return _git_remote_cache[normalized_path]
+
+    url = None
     try:
         result = subprocess.run(
             ["git", "-C", project_path, "config", "--get", "remote.origin.url"],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
         if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
+            url = result.stdout.strip()
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
-    return None
+
+    _git_remote_cache[normalized_path] = url
+    return url
 
 
 def _normalize_remote_url(url: str) -> str:

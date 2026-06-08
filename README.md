@@ -64,12 +64,18 @@ cursaves init --backend s3 --bucket my-cursor-saves
 Then from any project directory:
 
 ```bash
-# Automatic bidirectional sync (pull behind + push ahead)
+# Automatic global bidirectional sync (syncs all workspaces/projects on this machine)
 cursaves sync
 
+# Sync ONLY the current project workspace (faster, scopes to local directory)
+cursaves sync -l
+
 # Or manually:
-cursaves push              # save and push to remote
-cursaves pull              # pull and restore conversations
+cursaves push              # save and push current workspace chats
+cursaves push -g           # save and push ahead chats across all workspaces
+cursaves push -g --all     # Full Backup: push ALL chats across all workspaces
+cursaves pull              # pull and restore current workspace chats
+cursaves pull -g           # pull and restore all workspaces chats
 # Then restart Cursor (quit and reopen) to see the imported chats
 ```
 
@@ -84,7 +90,7 @@ cursaves push -w 3
 cursaves push -w 497e8ab0   # by hash (from the Hash column)
 ```
 
-`push` checkpoints your conversations and pushes to the remote. `pull` fetches from the remote and imports into Cursor's database. `sync` does both automatically — pulling conversations where your local copy is behind, and pushing ones where your local copy is ahead. After importing, restart Cursor (quit and reopen) to see the conversations.
+`sync` handles bidirectional sync. By default, it operates globally on all workspaces (`-g`/`--global`), but it can be scoped to the current directory with `-l`/`--local` or to a specific workspace using `-w`. `push` checkpoints your conversations and pushes to the remote (scopes to local workspace by default; use `-g`/`--global` to push all). `pull` fetches from the remote and imports snapshots (scopes to local workspace by default; use `-g`/`--global` to pull all). After importing, restart Cursor (quit and reopen) to see the conversations.
 
 ### Example
 
@@ -115,7 +121,7 @@ cadfb263-3326-4aff-8887-dcc12f736b11     Feedback on documentation...   agent   
 
 ## Installation
 
-**Requirements:** Python 3.10+, [uv](https://docs.astral.sh/uv/), macOS or Linux, Git (for git backend). Zero required Python dependencies.
+**Requirements:** Python 3.10+, [uv](https://docs.astral.sh/uv/), macOS, Linux, or Windows, Git (for git backend). Zero required Python dependencies.
 
 **Tested with:** Cursor 2.6–3.0 (supports both old and new chat storage formats)
 
@@ -195,31 +201,36 @@ The `sync` command pulls conversations where your local copy is behind the remot
 
 ## Commands
 
-All commands default to the current working directory as the project path. Use `-w <selector>` to target a workspace by number, hash, or path substring (from `cursaves workspaces`), or `-p /path` to specify a path directly.
+All commands default to the current working directory as the project path. Use `-g` for global mode, `-l` for local mode, `-w <selector>` to target a workspace by number, hash, or path substring (from `cursaves workspaces`), or `-p /path` to specify a path directly.
 
-| Command        | Description                                                | Modifies Cursor data? |
-| -------------- | ---------------------------------------------------------- | --------------------- |
-| **`sync`**     | **Pull behind + push ahead — one command to stay in sync** | Yes                   |
-| **`push`**     | **Checkpoint + push to remote**                            | No                    |
-| **`push -s`**  | **Interactively select which conversations to push**       | No                    |
-| **`pull`**     | **Pull from remote + import snapshots**                    | Yes                   |
-| `init`         | Initialize sync (git remote, S3 bucket, etc.)              | No                    |
-| `workspaces`   | List all Cursor workspaces (local, SSH, custom) with hash  | No                    |
-| `list`         | Show conversations for a project                           | No                    |
-| `snapshots`    | List snapshot projects available in ~/.cursaves/           | No                    |
-| `status`       | Compare local conversations vs snapshots                   | No                    |
-| `repair`       | Restore missing agent blobs from snapshots                 | Yes                   |
-| `delete`       | Delete cached snapshots (interactive, by ID, or all)       | No                    |
-| `export <id>`  | Export one conversation to a snapshot                      | No                    |
-| `checkpoint`   | Export all conversations (no push)                         | No                    |
-| `import --all` | Import snapshots (no pull)                                 | Yes                   |
-| `watch`        | Auto-checkpoint and sync in the background                 | No (reads only)       |
-| `copy`         | Copy conversations between workspaces (same machine)       | Yes                   |
-| `doctor`       | Audit chats: find orphaned/lost conversations, recover them | Yes (with `--recover`) |
-| `migrate`      | Migrate old chats to Cursor 3.0 global index                | Yes                   |
-| `purge`        | Delete chats from Cursor's DB to reclaim disk space          | Yes                   |
+| Command             | Description                                                   | Modifies Cursor data? |
+| ------------------- | ------------------------------------------------------------- | --------------------- |
+| **`sync`**          | **Bidirectional sync: pull behind + push ahead (global)**    | Yes                   |
+| **`sync -l`**       | **Bidirectional sync scoped to the current project (local)**  | Yes                   |
+| **`sync --all`**    | **Sync all chats (including never pushed ones) globally**     | Yes                   |
+| **`push`**          | **Checkpoint + push current project chats to remote**         | No                    |
+| **`push -g`**       | **Checkpoint + push ahead chats across all workspaces**       | No                    |
+| **`push -g --all`** | **Full Backup: Push ALL chats across all workspaces**         | No                    |
+| **`push -s`**       | **Interactively select which conversations to push**          | No                    |
+| **`pull`**          | **Pull + import snapshots for current project**               | Yes                   |
+| **`pull -g`**       | **Pull + import snapshots across all workspaces**             | Yes                   |
+| `init`              | Initialize sync (git remote, S3 bucket, etc.)                 | No                    |
+| `workspaces`        | List all Cursor workspaces (local, SSH, custom) with hash     | No                    |
+| `list`              | Show conversations for a project                              | No                    |
+| `snapshots`         | List snapshot projects available in ~/.cursaves/              | No                    |
+| `status`            | Compare local conversations vs snapshots                      | No                    |
+| `repair`            | Restore missing agent blobs from snapshots                    | Yes                   |
+| `delete`            | Delete cached snapshots (interactive, by ID, or all)          | No                    |
+| `export <id>`       | Export one conversation to a snapshot                         | No                    |
+| `checkpoint`        | Export all conversations (no push)                            | No                    |
+| `import --all`      | Import snapshots (no pull)                                    | Yes                   |
+| `watch`             | Auto-checkpoint and sync in the background                    | No (reads only)       |
+| `copy`              | Copy conversations between workspaces (same machine)          | Yes                   |
+| `doctor`            | Audit chats: find orphaned/lost conversations, recover them   | Yes (with `--recover`) |
+| `migrate`           | Migrate old chats to Cursor 3.0 global index                  | Yes                   |
+| `purge`             | Delete chats from Cursor's DB to reclaim disk space           | Yes                   |
 
-Most of the time you only need `sync`. Use `push -s` when you want to push specific conversations. Use `repair` if you get "Blob not found" errors after importing. Use `doctor` to find and recover orphaned chats. Use `migrate` after updating to Cursor 3.0 to make all old chats visible in the sidebar. Use `purge` to delete chats and reclaim disk space (requires Cursor to be closed). Use `delete` to clean up snapshots you no longer need.
+Most of the time you only need `sync` (globally or locally via `sync -l`). Use `push -s` when you want to push specific conversations. Use `repair` if you get "Blob not found" errors after importing. Use `doctor` to find and recover orphaned chats. Use `migrate` after updating to Cursor 3.0 to make all old chats visible in the sidebar. Use `purge` to delete chats and reclaim disk space (requires Cursor to be closed). Use `delete` to clean up snapshots you no longer need.
 
 ### Auto-sync with `watch`
 
@@ -248,6 +259,7 @@ Data locations:
 
 - macOS: `~/Library/Application Support/Cursor/User/`
 - Linux: `~/.config/Cursor/User/`
+- Windows: `%APPDATA%\Cursor\User\`
 
 Notably, **chat data is always stored on the machine running Cursor's UI**, even when connected to a remote host via SSH. This is why switching machines means losing your conversation context.
 
@@ -365,7 +377,7 @@ cursaves pull -w 497e8ab0    # By hash
 
 If you use a VS Code/Cursor custom workspace (e.g. `my-proj.code-workspace`), it may not appear in `cursaves workspaces` with a recognizable path. In that case:
 
-1. Find the workspace hash: browse `~/Library/Application Support/Cursor/User/workspaceStorage/` (macOS) or `~/.config/Cursor/User/workspaceStorage/` (Linux) and locate the directory containing your chats.
+1. Find the workspace hash: browse `~/Library/Application Support/Cursor/User/workspaceStorage/` (macOS), `~/.config/Cursor/User/workspaceStorage/` (Linux), or `%APPDATA%\Cursor\User\workspaceStorage\` (Windows) and locate the directory containing your chats.
 2. Use the hash as the workspace selector: `cursaves push -w <hash>` or `cursaves pull -w <hash>`.
 
 `cursaves workspaces` now shows custom workspaces as `(workspace)` and includes a Hash column you can use.

@@ -108,12 +108,18 @@ def is_cursor_running() -> bool:
     characters. Instead we parse `ps -axo args` and look for the main
     Cursor executable while excluding helpers, crash handlers, and the
     macOS CursorUIViewService system process.
+
+    On Windows, uses tasklist to check for Cursor.exe.
     """
+    import platform
+    if platform.system() == "Windows":
+        return _is_cursor_running_windows()
     try:
         result = subprocess.run(
             ["ps", "-axo", "args"],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if result.returncode != 0:
             return False
@@ -125,6 +131,77 @@ def is_cursor_running() -> bool:
         return False
     except FileNotFoundError:
         return False
+
+
+def _is_cursor_running_windows() -> bool:
+    """Check if Cursor.exe is running on Windows using ctypes (extremely fast)."""
+    import ctypes
+    from ctypes import wintypes
+
+    def fallback():
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq Cursor.exe", "/NH"],
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+            )
+            if result.returncode != 0:
+                return False
+            for line in result.stdout.splitlines():
+                if "Cursor.exe" in line:
+                    return True
+            return False
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+
+    try:
+        # Load Win32 API DLLs
+        psapi = ctypes.WinDLL("psapi.dll")
+        kernel32 = ctypes.WinDLL("kernel32.dll")
+        
+        PROCESS_QUERY_INFORMATION = 0x0400
+        PROCESS_VM_READ = 0x0010
+        
+        EnumProcesses = psapi.EnumProcesses
+        EnumProcesses.argtypes = [ctypes.POINTER(wintypes.DWORD), wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+        EnumProcesses.restype = wintypes.BOOL
+        
+        OpenProcess = kernel32.OpenProcess
+        OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        OpenProcess.restype = wintypes.HANDLE
+        
+        GetModuleBaseName = psapi.GetModuleBaseNameW
+        GetModuleBaseName.argtypes = [wintypes.HANDLE, wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD]
+        GetModuleBaseName.restype = wintypes.DWORD
+        
+        CloseHandle = kernel32.CloseHandle
+        CloseHandle.argtypes = [wintypes.HANDLE]
+        CloseHandle.restype = wintypes.BOOL
+
+        arr_size = 2048
+        pids = (wintypes.DWORD * arr_size)()
+        cb_needed = wintypes.DWORD()
+        if not EnumProcesses(pids, ctypes.sizeof(pids), ctypes.byref(cb_needed)):
+            return fallback()
+
+        num_pids = cb_needed.value // ctypes.sizeof(wintypes.DWORD)
+        for i in range(num_pids):
+            pid = pids[i]
+            if pid == 0:
+                continue
+            h_process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
+            if h_process:
+                buf = ctypes.create_unicode_buffer(260)
+                if GetModuleBaseName(h_process, None, buf, ctypes.sizeof(buf)):
+                    if buf.value.lower() == "cursor.exe":
+                        CloseHandle(h_process)
+                        return True
+                CloseHandle(h_process)
+        return False
+    except Exception:
+        return fallback()
 
 
 _SKIP_REWRITE_KEYS = frozenset({"conversationState"})
@@ -170,7 +247,13 @@ def find_or_create_workspace(project_path: str) -> Path:
     ws_dir.mkdir(parents=True, exist_ok=True)
 
     # Create workspace.json
-    folder_uri = "file://" + os.path.normpath(project_path)
+    norm_path = os.path.normpath(project_path)
+    import platform
+    if platform.system() == "Windows":
+        norm_path = norm_path.replace("\\", "/")
+        if not norm_path.startswith("/"):
+            norm_path = "/" + norm_path
+    folder_uri = "file://" + norm_path
     ws_json = ws_dir / "workspace.json"
     ws_json.write_text(json.dumps({"folder": folder_uri}))
 
@@ -369,53 +452,54 @@ def import_snapshot(
     # ── Step 2: Write conversation data to global DB ────────────────
     global_cdb = db.CursorDB(global_db_path)
     try:
-        # Write the main conversation data
-        global_cdb.write_json(f"composerData:{composer_id}", composer_data)
+        with global_cdb.transaction():
+            # Write the main conversation data
+            global_cdb.write_json(f"composerData:{composer_id}", composer_data)
 
-        # Write content blobs
-        if content_blobs:
-            global_cdb.write_batch(
-                [(f"composer.content.{h}", v) for h, v in content_blobs.items()]
-            )
+            # Write content blobs
+            if content_blobs:
+                global_cdb.write_batch(
+                    [(f"composer.content.{h}", v) for h, v in content_blobs.items()]
+                )
 
-        # Write message contexts (batch)
-        if message_contexts:
-            global_cdb.write_json_batch([
-                (f"messageRequestContext:{composer_id}:{msg_key}", context)
-                for msg_key, context in message_contexts.items()
-            ])
+            # Write message contexts (batch)
+            if message_contexts:
+                global_cdb.write_json_batch([
+                    (f"messageRequestContext:{composer_id}:{msg_key}", context)
+                    for msg_key, context in message_contexts.items()
+                ])
 
-        # Write bubble entries in a single transaction (can be 50K+ entries)
-        if bubble_entries:
-            if source_path and source_path != target_path:
-                bubble_entries = {
-                    bid: rewrite_paths(bdata, source_path, target_path)
-                    for bid, bdata in bubble_entries.items()
-                }
-            global_cdb.write_json_batch([
-                (f"bubbleId:{composer_id}:{bubble_id}", bubble_data)
-                for bubble_id, bubble_data in bubble_entries.items()
-            ])
+            # Write bubble entries in a single transaction (can be 50K+ entries)
+            if bubble_entries:
+                if source_path and source_path != target_path:
+                    bubble_entries = {
+                        bid: rewrite_paths(bdata, source_path, target_path)
+                        for bid, bdata in bubble_entries.items()
+                    }
+                global_cdb.write_json_batch([
+                    (f"bubbleId:{composer_id}:{bubble_id}", bubble_data)
+                    for bubble_id, bubble_data in bubble_entries.items()
+                ])
 
-        # Write checkpoint data (workspace state snapshots for agent continuation)
-        if checkpoints:
-            if source_path and source_path != target_path:
-                checkpoints = {
-                    cp_id: rewrite_paths(cp_data, source_path, target_path)
+            # Write checkpoint data (workspace state snapshots for agent continuation)
+            if checkpoints:
+                if source_path and source_path != target_path:
+                    checkpoints = {
+                        cp_id: rewrite_paths(cp_data, source_path, target_path)
+                        for cp_id, cp_data in checkpoints.items()
+                    }
+                global_cdb.write_json_batch([
+                    (f"checkpointId:{composer_id}:{cp_id}", cp_data)
                     for cp_id, cp_data in checkpoints.items()
-                }
-            global_cdb.write_json_batch([
-                (f"checkpointId:{composer_id}:{cp_id}", cp_data)
-                for cp_id, cp_data in checkpoints.items()
-            ])
+                ])
 
-        # Write agent state blobs (encrypted context for conversation continuation)
-        if agent_blobs:
-            import base64
-            global_cdb.write_batch([
-                (f"agentKv:blob:{bid}", base64.b64decode(bdata))
-                for bid, bdata in agent_blobs.items()
-            ])
+            # Write agent state blobs (encrypted context for conversation continuation)
+            if agent_blobs:
+                import base64
+                global_cdb.write_batch([
+                    (f"agentKv:blob:{bid}", base64.b64decode(bdata))
+                    for bid, bdata in agent_blobs.items()
+                ])
     finally:
         global_cdb.close()
 
@@ -716,10 +800,10 @@ def import_from_snapshot_dir(
         print(f"Importing {sf.name}...")
         if import_snapshot(sf, target_project_path, ws_dir, skip_backup=True):
             success += 1
-            print(f"  OK")
+            print("  OK")
         else:
             failure += 1
-            print(f"  FAILED")
+            print("  FAILED")
 
     return success, failure
 
@@ -759,7 +843,7 @@ def import_all_snapshots(
     if not project_snapshots:
         project_id = paths.get_project_identifier(target_project_path)
         print(f"No snapshots found for project '{project_id}'", file=sys.stderr)
-        print(f"Run 'cursaves snapshots' to see available snapshot projects.", file=sys.stderr)
+        print("Run 'cursaves snapshots' to see available snapshot projects.", file=sys.stderr)
         return 0, 0
 
     project_id = paths.get_project_identifier(target_project_path)
@@ -829,8 +913,14 @@ def _build_workspace_identifier(ws_dir: Path) -> dict:
     uri_obj: dict = {"$mid": 1}
     if folder_uri.startswith("file://"):
         fs_path = folder_uri[len("file://"):].replace("%20", " ")
+        import platform
+        if platform.system() == "Windows" and fs_path.startswith("/") and len(fs_path) > 2 and fs_path[2] == ":":
+            fs_path = fs_path[1:]
+        # Normalize slashes for Windows fsPath
+        if platform.system() == "Windows":
+            fs_path = fs_path.replace("/", "\\")
         uri_obj["fsPath"] = fs_path
-        uri_obj["path"] = fs_path
+        uri_obj["path"] = fs_path.replace("\\", "/") # VS Code path is always forward slashes
         uri_obj["external"] = folder_uri
         uri_obj["scheme"] = "file"
     elif folder_uri.startswith("vscode-remote://"):

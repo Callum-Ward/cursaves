@@ -171,7 +171,7 @@ def watch_loop(
         git_sync: Whether to auto-commit and push to git.
         verbose: Print status messages on every check.
     """
-    print(f"cursaves watch started")
+    print("cursaves watch started")
     print(f"  Project: {project_path}")
     print(f"  Interval: {interval}s")
     print(f"  Git sync: {'enabled' if git_sync else 'disabled'}")

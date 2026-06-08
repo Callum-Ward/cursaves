@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import subprocess
 import sys
 from abc import ABC, abstractmethod
@@ -19,7 +20,12 @@ from pathlib import Path
 from typing import Optional
 
 
-_CONFIG_PATH = Path.home() / ".config" / "cursaves" / "config.json"
+def _get_config_path() -> Path:
+    if platform.system() == "Windows":
+        return Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "cursaves" / "config.json"
+    return Path.home() / ".config" / "cursaves" / "config.json"
+
+_CONFIG_PATH = _get_config_path()
 
 
 # ── Abstract base ────────────────────────────────────────────────────────
@@ -93,7 +99,10 @@ class GitBackend(SyncBackend):
                 push_result = subprocess.run(
                     ["git", "push", "-u", "origin", "main"],
                     cwd=str(self.sync_dir),
-                    capture_output=True, text=True, timeout=120,
+                    capture_output=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=1200,
                 )
                 if push_result.returncode != 0:
                     print(f"  Push failed: {push_result.stderr.strip()}", file=sys.stderr)
@@ -107,7 +116,9 @@ class GitBackend(SyncBackend):
         try:
             result = subprocess.run(
                 ["git", "remote"],
-                capture_output=True, text=True,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
                 cwd=str(self.sync_dir),
             )
             return result.returncode == 0 and result.stdout.strip() != ""
@@ -139,12 +150,29 @@ class GitBackend(SyncBackend):
             return True
 
         try:
+            # Check if remote is completely empty
+            ls_remote = subprocess.run(
+                ["git", "ls-remote", "--heads", "origin"],
+                cwd=str(self.sync_dir),
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+            )
+            if ls_remote.returncode == 0 and not ls_remote.stdout.strip():
+                # Remote is completely empty, nothing to fetch or reset to
+                return True
+
             fetch = subprocess.run(
                 ["git", "fetch", "--depth", "1", "origin"],
                 cwd=str(self.sync_dir),
-                capture_output=True, text=True, timeout=180,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=600,
             )
             if fetch.returncode != 0:
+                # Still failed?
                 return False
 
             subprocess.run(
@@ -200,7 +228,9 @@ class GitBackend(SyncBackend):
         result = subprocess.run(
             ["git", "remote", "get-url", "origin"],
             cwd=str(self.sync_dir),
-            capture_output=True, text=True,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if result.returncode == 0:
             subprocess.run(
@@ -222,7 +252,7 @@ class S3Backend(SyncBackend):
 
     Requires ``boto3`` — install with ``pip install cursaves[s3]``.
 
-    Configuration (in ~/.config/cursaves/config.json)::
+    Configuration (in ~/.config/cursaves/config.json (or %APPDATA%/cursaves/config.json on Windows))::
 
         {
             "backend": "s3",
@@ -355,7 +385,7 @@ class S3Backend(SyncBackend):
 
 
 def load_config() -> dict:
-    """Load cursaves config from ~/.config/cursaves/config.json."""
+    """Load cursaves config from ~/.config/cursaves/config.json (or %APPDATA%/cursaves/config.json on Windows)."""
     if _CONFIG_PATH.exists():
         try:
             return json.loads(_CONFIG_PATH.read_text())
