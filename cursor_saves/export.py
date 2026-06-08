@@ -153,13 +153,11 @@ def get_content_blobs(composer_id: str) -> dict[str, str]:
     blobs = {}
     try:
         with db.CursorDB(global_db) as cdb:
-            content_keys = cdb.list_keys("composer.content.")
-            for key in content_keys:
+            content_items = cdb.get_items_by_prefix("composer.content.")
+            for key, val in content_items.items():
                 content_hash = key[len("composer.content."):]
                 if content_hash in conv_json:
-                    val = cdb.get_disk_kv(key)
-                    if val:
-                        blobs[content_hash] = val
+                    blobs[content_hash] = val
     except (OSError, FileNotFoundError):
         pass  # Non-fatal: content blobs are supplementary
 
@@ -174,12 +172,11 @@ def get_message_contexts(composer_id: str) -> dict[str, Any]:
 
     contexts = {}
     with db.CursorDB(global_db) as cdb:
-        keys = cdb.list_keys(f"messageRequestContext:{composer_id}:")
-        for key in keys:
-            val = cdb.get_json(key)
+        prefix = f"messageRequestContext:{composer_id}:"
+        items = cdb.get_json_items_by_prefix(prefix)
+        for key, val in items.items():
             if val:
-                # Store with a short key (just the message part)
-                short_key = key[len(f"messageRequestContext:{composer_id}:"):]
+                short_key = key[len(prefix):]
                 contexts[short_key] = val
 
     return contexts
@@ -198,12 +195,11 @@ def get_bubble_entries(composer_id: str) -> dict[str, Any]:
 
     bubbles = {}
     with db.CursorDB(global_db) as cdb:
-        keys = cdb.list_keys(f"bubbleId:{composer_id}:")
-        for key in keys:
-            val = cdb.get_json(key)
+        prefix = f"bubbleId:{composer_id}:"
+        items = cdb.get_json_items_by_prefix(prefix)
+        for key, val in items.items():
             if val:
-                # Store with just the bubble ID as key
-                bubble_id = key[len(f"bubbleId:{composer_id}:"):]
+                bubble_id = key[len(prefix):]
                 bubbles[bubble_id] = val
 
     return bubbles
@@ -396,10 +392,13 @@ def _extract_agent_blobs(
     if not blob_ids:
         return {}
 
+    keys = [f"agentKv:blob:{bid}" for bid in blob_ids]
+    raw_blobs = cdb.get_items_by_keys_binary(keys, table="cursorDiskKV")
+
     blobs: dict[str, str] = {}
     for bid in blob_ids:
         key = f"agentKv:blob:{bid}"
-        val = cdb.get_item_binary(key, table="cursorDiskKV")
+        val = raw_blobs.get(key)
         if val is not None:
             blobs[bid] = base64.b64encode(val).decode("ascii")
     return blobs
@@ -431,36 +430,38 @@ def export_conversation(
 
         # Bubble entries (individual message content)
         bubbles = {}
-        for key in _cdb.list_keys(f"bubbleId:{composer_id}:"):
-            val = _cdb.get_json(key)
+        bubble_prefix = f"bubbleId:{composer_id}:"
+        bubble_items = _cdb.get_json_items_by_prefix(bubble_prefix)
+        for key, val in bubble_items.items():
             if val:
-                bubble_id = key[len(f"bubbleId:{composer_id}:"):]
+                bubble_id = key[len(bubble_prefix):]
                 bubbles[bubble_id] = val
 
         # Content blobs referenced by this conversation
         conv_json = json.dumps(conv_data)
         blobs = {}
-        for key in _cdb.list_keys("composer.content."):
+        content_items = _cdb.get_items_by_prefix("composer.content.")
+        for key, val in content_items.items():
             content_hash = key[len("composer.content."):]
             if content_hash in conv_json:
-                val = _cdb.get_disk_kv(key)
-                if val:
-                    blobs[content_hash] = val
+                blobs[content_hash] = val
 
         # Message request contexts
         contexts = {}
-        for key in _cdb.list_keys(f"messageRequestContext:{composer_id}:"):
-            val = _cdb.get_json(key)
+        context_prefix = f"messageRequestContext:{composer_id}:"
+        context_items = _cdb.get_json_items_by_prefix(context_prefix)
+        for key, val in context_items.items():
             if val:
-                short_key = key[len(f"messageRequestContext:{composer_id}:"):]
+                short_key = key[len(context_prefix):]
                 contexts[short_key] = val
 
         # Checkpoint data (workspace state snapshots at each agent turn)
         checkpoints = {}
-        for key in _cdb.list_keys(f"checkpointId:{composer_id}:"):
-            val = _cdb.get_json(key)
+        checkpoint_prefix = f"checkpointId:{composer_id}:"
+        checkpoint_items = _cdb.get_json_items_by_prefix(checkpoint_prefix)
+        for key, val in checkpoint_items.items():
             if val:
-                cp_id = key[len(f"checkpointId:{composer_id}:"):]
+                cp_id = key[len(checkpoint_prefix):]
                 checkpoints[cp_id] = val
 
         # Agent state blobs (encrypted agent context needed for continuation).
@@ -497,7 +498,7 @@ def _compress_snapshot(snapshot: dict) -> bytes:
     json_bytes = json.dumps(snapshot, ensure_ascii=False).encode("utf-8")
     import io
     buf = io.BytesIO()
-    with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=9) as f:
+    with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=6) as f:
         f.write(json_bytes)
     return buf.getvalue()
 

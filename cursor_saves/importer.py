@@ -452,53 +452,54 @@ def import_snapshot(
     # ── Step 2: Write conversation data to global DB ────────────────
     global_cdb = db.CursorDB(global_db_path)
     try:
-        # Write the main conversation data
-        global_cdb.write_json(f"composerData:{composer_id}", composer_data)
+        with global_cdb.transaction():
+            # Write the main conversation data
+            global_cdb.write_json(f"composerData:{composer_id}", composer_data)
 
-        # Write content blobs
-        if content_blobs:
-            global_cdb.write_batch(
-                [(f"composer.content.{h}", v) for h, v in content_blobs.items()]
-            )
+            # Write content blobs
+            if content_blobs:
+                global_cdb.write_batch(
+                    [(f"composer.content.{h}", v) for h, v in content_blobs.items()]
+                )
 
-        # Write message contexts (batch)
-        if message_contexts:
-            global_cdb.write_json_batch([
-                (f"messageRequestContext:{composer_id}:{msg_key}", context)
-                for msg_key, context in message_contexts.items()
-            ])
+            # Write message contexts (batch)
+            if message_contexts:
+                global_cdb.write_json_batch([
+                    (f"messageRequestContext:{composer_id}:{msg_key}", context)
+                    for msg_key, context in message_contexts.items()
+                ])
 
-        # Write bubble entries in a single transaction (can be 50K+ entries)
-        if bubble_entries:
-            if source_path and source_path != target_path:
-                bubble_entries = {
-                    bid: rewrite_paths(bdata, source_path, target_path)
-                    for bid, bdata in bubble_entries.items()
-                }
-            global_cdb.write_json_batch([
-                (f"bubbleId:{composer_id}:{bubble_id}", bubble_data)
-                for bubble_id, bubble_data in bubble_entries.items()
-            ])
+            # Write bubble entries in a single transaction (can be 50K+ entries)
+            if bubble_entries:
+                if source_path and source_path != target_path:
+                    bubble_entries = {
+                        bid: rewrite_paths(bdata, source_path, target_path)
+                        for bid, bdata in bubble_entries.items()
+                    }
+                global_cdb.write_json_batch([
+                    (f"bubbleId:{composer_id}:{bubble_id}", bubble_data)
+                    for bubble_id, bubble_data in bubble_entries.items()
+                ])
 
-        # Write checkpoint data (workspace state snapshots for agent continuation)
-        if checkpoints:
-            if source_path and source_path != target_path:
-                checkpoints = {
-                    cp_id: rewrite_paths(cp_data, source_path, target_path)
+            # Write checkpoint data (workspace state snapshots for agent continuation)
+            if checkpoints:
+                if source_path and source_path != target_path:
+                    checkpoints = {
+                        cp_id: rewrite_paths(cp_data, source_path, target_path)
+                        for cp_id, cp_data in checkpoints.items()
+                    }
+                global_cdb.write_json_batch([
+                    (f"checkpointId:{composer_id}:{cp_id}", cp_data)
                     for cp_id, cp_data in checkpoints.items()
-                }
-            global_cdb.write_json_batch([
-                (f"checkpointId:{composer_id}:{cp_id}", cp_data)
-                for cp_id, cp_data in checkpoints.items()
-            ])
+                ])
 
-        # Write agent state blobs (encrypted context for conversation continuation)
-        if agent_blobs:
-            import base64
-            global_cdb.write_batch([
-                (f"agentKv:blob:{bid}", base64.b64decode(bdata))
-                for bid, bdata in agent_blobs.items()
-            ])
+            # Write agent state blobs (encrypted context for conversation continuation)
+            if agent_blobs:
+                import base64
+                global_cdb.write_batch([
+                    (f"agentKv:blob:{bid}", base64.b64decode(bdata))
+                    for bid, bdata in agent_blobs.items()
+                ])
     finally:
         global_cdb.close()
 
