@@ -755,6 +755,14 @@ def _push_ahead(
                 name = name[:37] + "..."
             print(f"    {name} [{item['workspace_label']}]")
         total = _export_and_push(sync_dir, ahead_items, backend=backend)
+        if total == 0:
+            print(
+                "  Warning: 0 conversation(s) exported. If chats exist in Cursor, "
+                "quit Cursor (Cmd+Q) and retry, or upgrade cursaves.",
+                file=sys.stderr,
+            )
+        else:
+            print(f"  Exported {total} conversation(s).")
         return total
 
     print(f"\n  {len(ahead_items)} conversation(s) ahead of snapshots:\n")

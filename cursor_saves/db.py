@@ -24,6 +24,20 @@ class CursorDB:
         self._conn: Optional[sqlite3.Connection] = None
         self._in_transaction = False
 
+    @staticmethod
+    def _probe_readable(conn: sqlite3.Connection) -> None:
+        """Raise OperationalError if the connection cannot read Cursor tables."""
+        tables = [
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('cursorDiskKV', 'ItemTable')"
+            ).fetchall()
+        ]
+        if not tables:
+            raise sqlite3.OperationalError("no Cursor tables visible")
+        for table in tables:
+            conn.execute(f"SELECT key FROM {table} LIMIT 1").fetchone()
+
     def _ensure_read_copy(self) -> sqlite3.Connection:
         """Copy the database to a temp file and open a read-only connection."""
         if self._conn is not None:
@@ -32,18 +46,18 @@ class CursorDB:
         if not self.db_path.exists():
             raise FileNotFoundError(f"Database not found: {self.db_path}")
 
-        # Try to connect directly in read-only and lock-free mode for speed
+        # Try to connect directly in read-only and lock-free mode for speed.
+        # Must validate real table reads: nolock can open the file but return an
+        # empty/unreadable WAL view (paths with spaces, or Cursor actively writing).
         if self.no_copy:
             try:
-                # Use SQLite URI with mode=ro and nolock=1 to prevent locking conflicts
-                db_uri = f"file:{self.db_path.as_posix()}?mode=ro&nolock=1"
+                db_uri = f"{self.db_path.resolve().as_uri()}?mode=ro&nolock=1"
                 conn = sqlite3.connect(db_uri, uri=True)
-                # Verify connection works by running a simple query
                 conn.execute("SELECT 1").fetchone()
+                self._probe_readable(conn)
                 self._conn = conn
                 return self._conn
             except sqlite3.OperationalError:
-                # Direct connect failed (e.g. URI support issues), fallback to copy method
                 pass
 
         # Copy the main db file and any WAL/SHM files

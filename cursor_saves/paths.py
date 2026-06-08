@@ -349,7 +349,7 @@ def get_workspace_composer_ids(ws_db_path: Path) -> list[str]:
         with db.CursorDB(ws_db_path) as cdb:
             data = cdb.get_json("composer.composerData", table="ItemTable")
             if not data:
-                return list(ids)
+                return list(ids)  # headers-only workspace (Cursor 3.0+)
 
             # Cursor 2.x: allComposers (complete list for old workspaces)
             for c in data.get("allComposers", []):
