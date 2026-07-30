@@ -157,6 +157,62 @@ class CursorDB:
         except json.JSONDecodeError:
             return None
 
+    def has_table(self, table: str) -> bool:
+        """Return whether the database contains a named table."""
+        conn = self._ensure_read_copy()
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone() is not None
+
+    def get_composer_headers(self) -> list[dict]:
+        """Read typed composer headers, returning an empty list if unsupported."""
+        conn = self._ensure_read_copy()
+        try:
+            rows = conn.execute(
+                """SELECT composerId, workspaceId, createdAt, lastUpdatedAt,
+                          isArchived, isSubagent, recency, checkpointAt, value
+                   FROM composerHeaders"""
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+
+        headers = []
+        for (
+            composer_id,
+            workspace_id,
+            created_at,
+            last_updated_at,
+            is_archived,
+            is_subagent,
+            recency,
+            checkpoint_at,
+            value,
+        ) in rows:
+            try:
+                entry = json.loads(value) if value else {}
+            except (json.JSONDecodeError, TypeError):
+                entry = {}
+            if not isinstance(entry, dict):
+                entry = {}
+
+            # Typed columns are authoritative over the denormalized JSON value.
+            entry["composerId"] = composer_id
+            if workspace_id:
+                identifier = entry.get("workspaceIdentifier")
+                if not isinstance(identifier, dict):
+                    identifier = {}
+                entry["workspaceIdentifier"] = {**identifier, "id": workspace_id}
+            if created_at is not None:
+                entry["createdAt"] = created_at
+            if last_updated_at is not None:
+                entry["lastUpdatedAt"] = last_updated_at
+            entry["isArchived"] = bool(is_archived)
+            if checkpoint_at is not None:
+                entry["conversationCheckpointLastUpdatedAt"] = checkpoint_at
+            headers.append(entry)
+        return headers
+
     # ── Write operations (on original file) ─────────────────────────
 
     def _get_write_conn(self) -> sqlite3.Connection:
@@ -211,6 +267,75 @@ class CursorDB:
             for key, data in items
         ]
         self.write_batch(serialized, table=table)
+
+    def write_composer_headers(self, entries: list[dict]) -> bool:
+        """Upsert typed composer headers when supported by this Cursor version.
+
+        Returns False when the optional composerHeaders table does not exist.
+        """
+        if not entries:
+            return self.has_table("composerHeaders")
+        conn = self._get_write_conn()
+        try:
+            conn.executemany(
+                """INSERT OR REPLACE INTO composerHeaders
+                   (composerId, workspaceId, createdAt, lastUpdatedAt,
+                    isArchived, isSubagent, recency, checkpointAt, value)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        entry["composerId"],
+                        entry.get("workspaceIdentifier", {}).get("id"),
+                        entry.get("createdAt"),
+                        entry.get("lastUpdatedAt"),
+                        int(bool(entry.get("isArchived", False))),
+                        int(
+                            not entry.get("isBestOfNSubcomposer", False)
+                            and (
+                                str(entry["composerId"]).startswith("task-")
+                                or bool(
+                                    (entry.get("subagentInfo") or {}).get(
+                                        "parentComposerId"
+                                    )
+                                )
+                            )
+                        ),
+                        entry.get("lastUpdatedAt", entry.get("createdAt")),
+                        entry.get("conversationCheckpointLastUpdatedAt"),
+                        json.dumps(entry, separators=(",", ":")),
+                    )
+                    for entry in entries
+                ],
+            )
+            conn.commit()
+            return True
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc):
+                return False
+            raise
+
+    def delete_composer_headers(self, composer_ids: list[str]) -> int:
+        """Delete typed composer headers when the optional table exists."""
+        if not composer_ids:
+            return 0
+        conn = self._get_write_conn()
+        try:
+            total = 0
+            for batch_start in range(0, len(composer_ids), 500):
+                batch = composer_ids[batch_start:batch_start + 500]
+                placeholders = ",".join("?" for _ in batch)
+                cur = conn.execute(
+                    f"DELETE FROM composerHeaders "
+                    f"WHERE composerId IN ({placeholders})",
+                    batch,
+                )
+                total += cur.rowcount
+            conn.commit()
+            return total
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc):
+                return 0
+            raise
 
     def delete_keys(self, keys: list[str], table: str = "cursorDiskKV") -> int:
         """Delete multiple keys in a single transaction on the ORIGINAL database.

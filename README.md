@@ -115,9 +115,13 @@ cadfb263-3326-4aff-8887-dcc12f736b11     Feedback on documentation...   agent   
 
 ## Installation
 
-**Requirements:** Python 3.10+, [uv](https://docs.astral.sh/uv/), macOS or Linux, Git (for git backend). Zero required Python dependencies.
+**Requirements:** Python 3.10+, [uv](https://docs.astral.sh/uv/), macOS, Linux, or Windows, Git (for git backend). Zero required Python dependencies.
 
-**Tested with:** Cursor 2.6–3.0 (supports both old and new chat storage formats)
+**Tested with:** Cursor 2.6–3.7+ (supports legacy JSON and typed `composerHeaders` storage)
+
+> Windows requires the platform support from PR #11 until that change is
+> merged upstream. The `buwaneka-halpage/cursaves@windows-autosave` branch
+> combines it with the current storage and hook updates.
 
 ### Install as a global CLI tool (recommended)
 
@@ -214,6 +218,8 @@ All commands default to the current working directory as the project path. Use `
 | `checkpoint`   | Export all conversations (no push)                         | No                    |
 | `import --all` | Import snapshots (no pull)                                 | Yes                   |
 | `watch`        | Auto-checkpoint and sync in the background                 | No (reads only)       |
+| `autosave`     | Internal push-only worker used by the Cursor hook           | No (reads only)       |
+| `hooks install`| Install the user-level per-turn autosave hook               | No                    |
 | `copy`         | Copy conversations between workspaces (same machine)       | Yes                   |
 | `doctor`       | Audit chats: find orphaned/lost conversations, recover them | Yes (with `--recover`) |
 | `migrate`      | Migrate old chats to Cursor 3.0 global index                | Yes                   |
@@ -235,14 +241,35 @@ cursaves watch --verbose         # log every check, not just changes
 
 The watch daemon polls for database changes, auto-checkpoints when conversations update, and commits + pushes to git. On the other end, it pulls and picks up new snapshots.
 
+### Commit and push after every agent turn
+
+Install a user-level Cursor `stop` hook:
+
+```bash
+cursaves hooks install
+```
+
+The hook returns immediately, then a detached worker waits three seconds for
+Cursor to flush its database, checkpoints every conversation that is ahead of
+its snapshot, commits, and pushes. Rapid turns are coalesced into one push.
+The hook is push-only: it never imports or pulls while Cursor is running.
+
+The hook applies to every project for the current user. Run the install command
+on each Mac, Linux, or Windows machine where you want automatic pushes. It
+preserves unrelated entries already present in `~/.cursor/hooks.json`.
+
+Failures are fail-open and logged to
+`~/.config/cursaves/autosave/autosave.log`; pending work is retried after the
+next completed or aborted turn.
+
 ## How Cursor Stores Chat Data
 
 Cursor stores conversations in two local SQLite databases, not as files you can easily copy:
 
 - **Workspace DB** (`workspaceStorage/{id}/state.vscdb`): Links conversations to a workspace. In Cursor ≤2.6, this contains a chat list (`allComposers`). In Cursor 3.0+, this list is removed and replaced by a central index in the global DB.
-- **Global DB** (`globalStorage/state.vscdb`): The actual conversation content -- one JSON blob per conversation, keyed by `composerData:{UUID}`. In Cursor 3.0+, also contains `composer.composerHeaders` -- a central index mapping every chat to its workspace.
+- **Global DB** (`globalStorage/state.vscdb`): The actual conversation content -- one JSON blob per conversation, keyed by `composerData:{UUID}`. Cursor 3.0 introduced the legacy `composer.composerHeaders` JSON index; current Cursor also uses a typed `composerHeaders` SQLite table.
 
-> **Cursor 3.0 migration (April 2026):** Cursor 3.0 centralized the chat-workspace index from per-workspace DBs into the global DB. cursaves handles both formats transparently. See [docs/how-cursor-stores-chats.md](docs/how-cursor-stores-chats.md) for details.
+> **Cursor storage migrations:** Cursor 3.0 centralized the chat-workspace index. Cursor 3.7+ made the typed `composerHeaders` table authoritative for the Agents sidebar. cursaves reads, writes, migrates, and purges both formats. See [docs/how-cursor-stores-chats.md](docs/how-cursor-stores-chats.md) for details.
 
 Data locations:
 

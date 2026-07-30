@@ -133,8 +133,13 @@ def find_workspace_dirs_for_project(project_path: str) -> list[Path]:
         except (json.JSONDecodeError, OSError):
             continue
 
-    # Sort by modification time, newest first
-    matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    # workspaceMetadata.entries records the workspace ID Cursor currently uses
+    # for a path. Prefer it over stale duplicate workspaceStorage directories.
+    active_ids = get_active_workspace_ids()
+    matches.sort(
+        key=lambda p: (p.name in active_ids, p.stat().st_mtime),
+        reverse=True,
+    )
     return matches
 
 
@@ -239,17 +244,56 @@ def list_all_workspaces() -> list[dict]:
         except (json.JSONDecodeError, OSError):
             continue
 
-    # Sort by modification time, newest first
-    workspaces.sort(key=lambda w: w["mtime"], reverse=True)
+    active_ids = get_active_workspace_ids()
+    by_path: dict[tuple[str, Optional[str], str], list[dict]] = {}
+    for ws in workspaces:
+        key = (ws["type"], ws.get("host"), ws["path"])
+        by_path.setdefault(key, []).append(ws)
+    for duplicates in by_path.values():
+        canonical = max(
+            duplicates,
+            key=lambda ws: (
+                ws["workspace_dir"].name in active_ids,
+                ws["mtime"],
+            ),
+        )
+        for ws in duplicates:
+            ws["is_canonical"] = ws is canonical
+
+    # Canonical workspaces sort first, then newest first.
+    workspaces.sort(
+        key=lambda w: (w["is_canonical"], w["mtime"]),
+        reverse=True,
+    )
     return workspaces
 
 
-def get_global_composer_headers() -> list[dict]:
-    """Read the central composer.composerHeaders from the global DB.
+def get_active_workspace_ids() -> set[str]:
+    """Return workspace IDs from Cursor's canonical workspace metadata."""
+    from . import db
 
-    Returns the allComposers list from composer.composerHeaders in the
-    global DB's ItemTable. In Cursor 3.0+ this is the authoritative
-    index of all chats, each tagged with a workspaceIdentifier.
+    global_db = get_global_db_path()
+    if not global_db.exists():
+        return set()
+    try:
+        with db.CursorDB(global_db) as cdb:
+            metadata = cdb.get_json("workspaceMetadata.entries", table="ItemTable")
+    except Exception:
+        return set()
+    if not isinstance(metadata, dict):
+        return set()
+    return {
+        entry["workspaceId"]
+        for entry in metadata.get("entries", [])
+        if isinstance(entry, dict) and entry.get("workspaceId")
+    }
+
+
+def get_global_composer_headers() -> list[dict]:
+    """Read and merge the typed and legacy global composer header stores.
+
+    Typed composerHeaders rows are authoritative when a composer exists in
+    both stores. The ItemTable JSON remains a fallback for older Cursor.
 
     Returns an empty list if not present (pre-3.0 Cursor).
     """
@@ -260,9 +304,22 @@ def get_global_composer_headers() -> list[dict]:
         return []
     try:
         with db.CursorDB(global_db) as cdb:
-            headers = cdb.get_json("composer.composerHeaders", table="ItemTable")
-            if headers and isinstance(headers, dict):
-                return headers.get("allComposers", [])
+            legacy = cdb.get_json("composer.composerHeaders", table="ItemTable")
+            legacy_entries = (
+                legacy.get("allComposers", [])
+                if isinstance(legacy, dict)
+                else []
+            )
+            merged = {
+                entry.get("composerId"): entry
+                for entry in legacy_entries
+                if isinstance(entry, dict) and entry.get("composerId")
+            }
+            for entry in cdb.get_composer_headers():
+                composer_id = entry.get("composerId")
+                if composer_id:
+                    merged[composer_id] = entry
+            return list(merged.values())
     except Exception:
         pass
     return []

@@ -1,6 +1,6 @@
 # How Cursor Stores Chat Data
 
-This document describes how Cursor IDE stores agent/chat conversation data internally, based on reverse-engineering the storage format. Originally documented in February 2026 (Cursor ~2.6), updated in April 2026 for the Cursor 3.0 migration.
+This document describes how Cursor IDE stores agent/chat conversation data internally, based on reverse-engineering the storage format. Originally documented in February 2026 (Cursor ~2.6), updated for the Cursor 3.0 migration and the typed header table used by Cursor 3.7+.
 
 ## Overview
 
@@ -11,6 +11,7 @@ There are two databases that matter, plus some auxiliary files:
 ```
 ~/Library/Application Support/Cursor/User/   (macOS)
 ~/.config/Cursor/User/                        (Linux)
+%APPDATA%\Cursor\User\                       (Windows)
 ├── globalStorage/
 │   └── state.vscdb                           # Global DB -- conversation content + central index (3.0+)
 └── workspaceStorage/
@@ -56,7 +57,28 @@ In Cursor ≤2.6, this is what populates the **sidebar** — the list of convers
 
 **Location:** `globalStorage/state.vscdb`
 
-This single database stores the actual conversation content for **all projects**. It has the same two tables (`ItemTable`, `cursorDiskKV`). Conversation data lives in `cursorDiskKV`. In Cursor 3.0+, the central chat-workspace index (`composer.composerHeaders`) lives in `ItemTable`.
+This single database stores the actual conversation content for **all projects**. Conversation data lives in `cursorDiskKV`. Cursor 3.0 introduced the central `composer.composerHeaders` JSON index in `ItemTable`. Current Cursor also has a typed `composerHeaders` table, which is authoritative when the `composer_header_typed_table` feature is enabled.
+
+The typed table denormalizes fields used to query the Agents sidebar while
+retaining the complete header JSON:
+
+```sql
+CREATE TABLE composerHeaders (
+  composerId TEXT PRIMARY KEY,
+  workspaceId TEXT,
+  createdAt INTEGER,
+  lastUpdatedAt INTEGER,
+  isArchived INTEGER,
+  isSubagent INTEGER,
+  recency INTEGER,
+  checkpointAt INTEGER,
+  value TEXT
+);
+```
+
+During the transition, both stores can exist and drift. Typed rows win when the
+same `composerId` is present in both. Compatible tools must dual-write imports
+and dual-delete purged conversations.
 
 The global DB stores five types of entries for each conversation, all keyed by `composerId`:
 
@@ -80,12 +102,20 @@ Open project
   → Shows them in the sidebar
 ```
 
-**Cursor 3.0+:**
+**Cursor 3.0–3.6:**
 ```
 Open project
   → Cursor reads composer.composerHeaders from global DB
   → Filters entries by workspaceIdentifier matching this workspace
   → Shows them in the sidebar
+```
+
+**Cursor 3.7+:**
+```
+Open project
+  → Cursor queries the typed composerHeaders table
+  → Filters rows by workspaceId, archive/subagent state, and recency
+  → Parses each row's value JSON and shows it in Agents
 ```
 
 **Both versions:**
@@ -200,22 +230,28 @@ On a machine running Cursor 3.0, recently-opened workspaces will have migrated w
 
 ### How cursaves handles this
 
-As of v0.8.2, cursaves combines multiple sources for maximum coverage:
+Current cursaves combines multiple sources for maximum coverage:
 
 **Discovery (reading):**
-1. `composer.composerHeaders` in global DB (Cursor 3.0+ central index — fast, authoritative for recent chats)
-2. `allComposers` in workspace DB (Cursor 2.x — complete for old workspaces)
-3. `selectedComposerIds`, `lastFocusedComposerIds`, and `composerChatViewPane.*` in workspace DB (catches chats not yet in the global index)
-4. For IDs found only via (3), metadata is fetched from the global DB's `composerData:{id}` entry
+1. Typed `composerHeaders` rows (Cursor 3.7+ authoritative index)
+2. `composer.composerHeaders` in `ItemTable` (Cursor 3.0 legacy index)
+3. `allComposers` in workspace DB (Cursor 2.x — complete for old workspaces)
+4. `selectedComposerIds`, `lastFocusedComposerIds`, and `composerChatViewPane.*` in workspace DB
+5. For IDs found only via workspace registration, metadata is fetched from `composerData:{id}`
 
 **Registration (writing):**
 - **Cursor 2.x** workspaces: append to `allComposers` + `selectedComposerIds` in workspace DB
-- **Cursor 3.0+** workspaces: add to `composer.composerHeaders` in global DB (with `workspaceIdentifier`) + `selectedComposerIds` in workspace DB
+- **Cursor 3.0+** workspaces: dual-write the legacy JSON and typed global header stores (with the canonical workspace ID) + `selectedComposerIds` in the workspace DB
 - In both cases, conversation data is written to the global DB identically
 
 **Migration:**
 
-`cursaves migrate` scans all workspaces for chats tracked in the old format that are missing from `composer.composerHeaders`, and adds them with the correct `workspaceIdentifier`. This makes old chats appear in Cursor 3.0's sidebar without needing to manually re-open each one. Use `--dry-run` to preview first.
+`cursaves migrate` scans all workspaces for chats missing from either global
+header store and writes them with the canonical `workspaceIdentifier`. The
+canonical ID comes from Cursor's `workspaceMetadata.entries` when duplicate
+workspace directories point to the same path. `cursaves doctor --recover`
+also repairs header drift and merges `selectedComposerIds` into that canonical
+workspace. Use `--dry-run` to preview migration first.
 
 **Deletion (purge):**
 
@@ -223,7 +259,7 @@ As of v0.8.2, cursaves combines multiple sources for maximum coverage:
 - `composerData:{id}` — the chat metadata and conversation map
 - `bubbleId:{id}:*` — all message bubble entries (typically the bulk of storage)
 - `checkpointId:{id}:*` — agent checkpoint data
-- The chat's entry in `composer.composerHeaders` (global DB)
+- The chat's entries in both global header stores
 - The chat's entry in `allComposers` / `selectedComposerIds` (workspace DB)
 
 After purging, run `sqlite3 '<global-db-path>' 'VACUUM;'` to actually reclaim the freed disk space. Cursor must be fully closed before purging.
