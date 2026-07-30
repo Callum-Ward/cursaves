@@ -123,6 +123,10 @@ cadfb263-3326-4aff-8887-dcc12f736b11     Feedback on documentation...   agent   
 > merged upstream. The `buwaneka-halpage/cursaves@windows-autosave` branch
 > combines it with the current storage and hook updates.
 
+```powershell
+uv tool install --force "git+https://github.com/buwaneka-halpage/cursaves.git@windows-autosave"
+```
+
 ### Install as a global CLI tool (recommended)
 
 ```bash
