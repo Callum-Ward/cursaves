@@ -96,6 +96,32 @@ def test_worker_leaves_failed_batch_for_next_turn(autosave_state):
     assert not autosave._lock_dir().exists()
 
 
+def test_push_ahead_includes_new_conversations(monkeypatch, tmp_path):
+    calls = []
+    backend = object()
+    monkeypatch.setattr("cursor_saves.paths.is_sync_repo_initialized", lambda: True)
+    monkeypatch.setattr("cursor_saves.paths.get_sync_dir", lambda: tmp_path)
+    monkeypatch.setattr("cursor_saves.backends.get_backend", lambda: backend)
+    monkeypatch.setattr(
+        "cursor_saves.cli._push_ahead",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    autosave._push_ahead()
+
+    assert calls == [
+        (
+            (tmp_path,),
+            {
+                "auto": True,
+                "backend": backend,
+                "include_never_pushed": True,
+                "fail_on_push_error": True,
+            },
+        )
+    ]
+
+
 def test_worker_does_not_join_an_existing_live_worker(autosave_state, monkeypatch):
     autosave._record_pending()
     lock = autosave._lock_dir()

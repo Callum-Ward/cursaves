@@ -176,6 +176,7 @@ def _push_ahead() -> None:
         paths.get_sync_dir(),
         auto=True,
         backend=get_backend(),
+        include_never_pushed=True,
         fail_on_push_error=True,
     )
 
