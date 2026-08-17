@@ -249,6 +249,12 @@ Data locations:
 - macOS: `~/Library/Application Support/Cursor/User/`
 - Linux: `~/.config/Cursor/User/`
 
+If you launch Cursor with `--user-data-dir`, pass the same flag to cursaves so it reads that profile instead of the default:
+
+```bash
+cursaves --user-data-dir ~/.cursor-work list
+```
+
 Notably, **chat data is always stored on the machine running Cursor's UI**, even when connected to a remote host via SSH. This is why switching machines means losing your conversation context.
 
 For more details, see [docs/how-cursor-stores-chats.md](docs/how-cursor-stores-chats.md).

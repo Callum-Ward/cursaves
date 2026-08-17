@@ -1684,15 +1684,32 @@ def cmd_migrate(args):
 
 
 def main():
+    global_opts = argparse.ArgumentParser(add_help=False)
+    global_opts.add_argument(
+        "--user-data-dir",
+        metavar="DIR",
+        default=argparse.SUPPRESS,
+        help=(
+            "Cursor user data directory (same as Cursor's --user-data-dir). "
+            "Default: ~/.config/Cursor (Linux) or "
+            "~/Library/Application Support/Cursor (macOS)"
+        ),
+    )
+
     parser = argparse.ArgumentParser(
         prog="cursaves",
         description="Sync Cursor agent chat sessions between machines.",
+        parents=[global_opts],
     )
     parser.add_argument(
         "--version", action="version", version=f"cursaves {__version__}"
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    def add_subparser(*args, **kwargs):
+        kwargs["parents"] = [global_opts, *kwargs.get("parents", [])]
+        return subparsers.add_parser(*args, **kwargs)
 
     # Helper to add -w and -p flags to a subparser
     def add_project_args(p):
@@ -1703,7 +1720,7 @@ def main():
         p.add_argument("--project", "-p", help="Project path (default: current directory)")
 
     # ── init ────────────────────────────────────────────────────────
-    p_init = subparsers.add_parser(
+    p_init = add_subparser(
         "init", help="Initialize sync (git repo, S3 bucket, etc.)"
     )
     p_init.add_argument(
@@ -1730,38 +1747,38 @@ def main():
     p_init.set_defaults(func=cmd_init)
 
     # ── workspaces ─────────────────────────────────────────────────
-    p_workspaces = subparsers.add_parser(
+    p_workspaces = add_subparser(
         "workspaces", help="List all Cursor workspaces (local and SSH remote)"
     )
     p_workspaces.set_defaults(func=cmd_workspaces)
 
     # ── snapshots ──────────────────────────────────────────────────
-    p_snapshots = subparsers.add_parser(
+    p_snapshots = add_subparser(
         "snapshots", help="List snapshot projects available in ~/.cursaves/"
     )
     p_snapshots.set_defaults(func=cmd_snapshots)
 
     # ── list ────────────────────────────────────────────────────────
-    p_list = subparsers.add_parser("list", help="List conversations for a project")
+    p_list = add_subparser("list", help="List conversations for a project")
     add_project_args(p_list)
     p_list.add_argument("--json", action="store_true", help="Output as JSON for scripting")
     p_list.set_defaults(func=cmd_list)
 
     # ── export ──────────────────────────────────────────────────────
-    p_export = subparsers.add_parser("export", help="Export a single conversation")
+    p_export = add_subparser("export", help="Export a single conversation")
     p_export.add_argument("id", help="Conversation (composer) ID")
     add_project_args(p_export)
     p_export.set_defaults(func=cmd_export)
 
     # ── checkpoint ──────────────────────────────────────────────────
-    p_checkpoint = subparsers.add_parser(
+    p_checkpoint = add_subparser(
         "checkpoint", help="Export all conversations for a project"
     )
     add_project_args(p_checkpoint)
     p_checkpoint.set_defaults(func=cmd_checkpoint)
 
     # ── import ──────────────────────────────────────────────────────
-    p_import = subparsers.add_parser("import", help="Import conversation snapshots")
+    p_import = add_subparser("import", help="Import conversation snapshots")
     p_import.add_argument("--all", action="store_true", help="Import all snapshots for the project")
     p_import.add_argument("--file", "-f", help="Import a specific snapshot file")
     add_project_args(p_import)
@@ -1776,7 +1793,7 @@ def main():
     p_import.set_defaults(func=cmd_import)
 
     # ── push ────────────────────────────────────────────────────────
-    p_push = subparsers.add_parser(
+    p_push = add_subparser(
         "push", help="Checkpoint + commit + push (one command to save and sync)"
     )
     add_project_args(p_push)
@@ -1795,7 +1812,7 @@ def main():
     p_push.set_defaults(func=cmd_push)
 
     # ── pull ────────────────────────────────────────────────────────
-    p_pull = subparsers.add_parser(
+    p_pull = add_subparser(
         "pull", help="Git pull + import snapshots (one command to sync and restore)"
     )
     p_pull.add_argument(
@@ -1818,25 +1835,25 @@ def main():
     p_pull.set_defaults(func=cmd_pull)
 
     # ── sync ──────────────────────────────────────────────────────
-    p_sync = subparsers.add_parser(
+    p_sync = add_subparser(
         "sync", help="Pull behind + push ahead — one command to stay in sync across machines"
     )
     p_sync.set_defaults(func=cmd_sync)
 
     # ── repair ─────────────────────────────────────────────────────
-    p_repair = subparsers.add_parser(
+    p_repair = add_subparser(
         "repair", help="Restore missing agent blobs from snapshots (fixes 'Blob not found' errors)"
     )
     p_repair.set_defaults(func=cmd_repair)
 
     # ── reload ─────────────────────────────────────────────────────
-    p_reload = subparsers.add_parser(
+    p_reload = add_subparser(
         "reload", help="(deprecated) Print restart instructions"
     )
     p_reload.set_defaults(func=cmd_reload)
 
     # ── delete ─────────────────────────────────────────────────────
-    p_delete = subparsers.add_parser(
+    p_delete = add_subparser(
         "delete", help="Delete cached snapshots"
     )
     p_delete.add_argument("--project", "-p", help="Project path (default: current directory)")
@@ -1857,7 +1874,7 @@ def main():
     p_delete.set_defaults(func=cmd_delete)
 
     # ── copy ───────────────────────────────────────────────────────
-    p_copy = subparsers.add_parser(
+    p_copy = add_subparser(
         "copy", help="Copy conversations between workspaces (same machine)"
     )
     p_copy.add_argument(
@@ -1867,12 +1884,12 @@ def main():
     p_copy.set_defaults(func=cmd_copy)
 
     # ── status ──────────────────────────────────────────────────────
-    p_status = subparsers.add_parser("status", help="Show sync status")
+    p_status = add_subparser("status", help="Show sync status")
     add_project_args(p_status)
     p_status.set_defaults(func=cmd_status)
 
     # ── watch ────────────────────────────────────────────────────────
-    p_watch = subparsers.add_parser(
+    p_watch = add_subparser(
         "watch", help="Auto-checkpoint and sync in the background"
     )
     add_project_args(p_watch)
@@ -1888,7 +1905,7 @@ def main():
     p_watch.set_defaults(func=cmd_watch)
 
     # ── doctor ─────────────────────────────────────────────────────
-    p_doctor = subparsers.add_parser(
+    p_doctor = add_subparser(
         "doctor", help="Audit chats and recover orphaned conversations"
     )
     p_doctor.add_argument(
@@ -1905,7 +1922,7 @@ def main():
     )
     p_doctor.set_defaults(func=cmd_doctor)
 
-    p_migrate = subparsers.add_parser(
+    p_migrate = add_subparser(
         "migrate", help="Migrate old chats to Cursor 3.0 global index"
     )
     p_migrate.add_argument(
@@ -1918,7 +1935,7 @@ def main():
     )
     p_migrate.set_defaults(func=cmd_migrate)
 
-    p_purge = subparsers.add_parser(
+    p_purge = add_subparser(
         "purge", help="Delete chats from Cursor's database to reclaim space"
     )
     p_purge.add_argument(
@@ -1932,6 +1949,8 @@ def main():
     p_purge.set_defaults(func=cmd_purge)
 
     args = parser.parse_args()
+    if getattr(args, "user_data_dir", None):
+        paths.set_user_data_dir(args.user_data_dir)
     if not args.command:
         print(
             "cursaves - sync Cursor chats between machines\n"
@@ -1972,6 +1991,7 @@ def main():
             "  -p <path>             Target project path\n"
             "  -s, --select          Interactive selection mode\n"
             "  -y, --yes             Skip confirmation prompts\n"
+            "  --user-data-dir <dir> Cursor profile dir (same as Cursor's flag)\n"
             "\n"
             "After importing, restart Cursor (quit + reopen) to see chats.\n"
             "\n"
