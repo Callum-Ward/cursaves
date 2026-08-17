@@ -7,20 +7,33 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 
-def get_cursor_user_dir() -> Path:
-    """Return the Cursor User data directory for the current platform.
+# Override set by --user-data-dir (Cursor's profile root, containing User/).
+_user_data_dir: Optional[Path] = None
 
-    macOS:  ~/Library/Application Support/Cursor/User
-    Linux:  ~/.config/Cursor/User
+
+def set_user_data_dir(path: Union[str, Path]) -> None:
+    """Override the Cursor user data directory (same as Cursor's --user-data-dir)."""
+    global _user_data_dir
+    _user_data_dir = Path(path).expanduser().resolve()
+
+
+def get_user_data_dir() -> Path:
+    """Return the Cursor user data directory (profile root containing User/).
+
+    macOS:  ~/Library/Application Support/Cursor
+    Linux:  ~/.config/Cursor
     """
+    if _user_data_dir is not None:
+        return _user_data_dir
+
     system = platform.system()
     if system == "Darwin":
-        base = Path.home() / "Library" / "Application Support" / "Cursor" / "User"
+        return Path.home() / "Library" / "Application Support" / "Cursor"
     elif system == "Linux":
-        base = Path.home() / ".config" / "Cursor" / "User"
+        return Path.home() / ".config" / "Cursor"
     else:
         print(
             f"Error: Unsupported platform '{system}'.\n"
@@ -31,6 +44,16 @@ def get_cursor_user_dir() -> Path:
         )
         sys.exit(1)
 
+
+def get_cursor_user_dir() -> Path:
+    """Return the Cursor User data directory for the current platform.
+
+    macOS:  ~/Library/Application Support/Cursor/User
+    Linux:  ~/.config/Cursor/User
+    """
+    base = get_user_data_dir() / "User"
+    system = platform.system()
+
     if not base.exists():
         print(
             f"Error: Cursor data directory not found at:\n"
@@ -38,7 +61,8 @@ def get_cursor_user_dir() -> Path:
             f"This usually means:\n"
             f"  - Cursor is not installed on this machine, or\n"
             f"  - Cursor has never been opened (no data created yet), or\n"
-            f"  - Cursor stores data at a non-standard location\n\n"
+            f"  - Cursor stores data at a non-standard location "
+            f"(pass --user-data-dir, the same flag Cursor uses)\n\n"
             f"Expected path for {system}: {base}",
             file=sys.stderr,
         )
